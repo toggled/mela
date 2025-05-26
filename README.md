@@ -1,0 +1,3 @@
+- Check the source codes in src/
+- Check the datasets in data/
+- Run `cd src/` on the terminal and follow the instructions in src/README.md

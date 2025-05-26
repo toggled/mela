@@ -1,2 +1,0 @@
-data/pyg_data/hypergraph_dataset_updated/coauthor_dblp/processed/data.pt filter=lfs diff=lfs merge=lfs -text
-data/pyg_data/hypergraph_dataset_updated/coauthor_dblp/raw/coauthor_dblp filter=lfs diff=lfs merge=lfs -text

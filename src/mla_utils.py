@@ -127,7 +127,7 @@ def semantic_feature_change(X, X_adv):
     cosine = F.cosine_similarity(X, X_adv, dim=1)
     return 1.0 - cosine.mean().item()
 
-@torch.no_grad
+@torch.no_grad()
 def classification_drop_pois(model, model_pois, H, X, H_adv, X_adv, labels, W_e = None):
     if W_e is None:
         logits_orig = model(X, H)

@@ -225,7 +225,7 @@ def meta_laplacian_FGSM(H, X, y, data, HG, surrogate_class, target_model, train_
         delta_X = delta_X.clamp(-epsilon, epsilon)
         time2 = time.time() - runtime_start2
     # results = [(t, loss_meta, acc_drop, lap_shift, deg_penalty, cls_loss, lap_dist, feature_shift)]
-    print(lap_shift_trajectory)
+    # print(lap_shift_trajectory)
     results = [loss_meta_trajectory, acc_drop_trajectory, lap_shift_trajectory, lap_dist_trajectory, cls_loss_trajectory, \
                deg_penalty_trajectory,feature_shift_trajectory,surrogate_test_trajectory, target_test_trajectory]
     # mask = filter_potential_singletons(torch.clamp(H + delta_H, 0, 1))

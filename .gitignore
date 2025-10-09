@@ -2,7 +2,7 @@
 .DS_Store
 data/
 data.tar.gz
-
-._DS_Store
-.DS_Store
-data.tar.gz
+src/__pycache__/
+src/*.pyc
+src/base_newsplit
+src/HGNN_Melad

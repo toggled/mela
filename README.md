@@ -1,3 +1,3 @@
-- Source codes are in src/
+- Source codes are in src/ folder
 - Datasets can be found in this [google drive link](https://drive.google.com/file/d/1K_jowjLHsWevJWzjrDPt0b6xMokMaFPg/view?usp=sharing). Extract the data.tar.gz compressed file here such that src/ and data/ are in the same folder.
 - Run `cd src/` on the terminal and follow the instructions in src/README.md

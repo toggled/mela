@@ -138,7 +138,7 @@ def meta_laplacian_FGSM(H, X, y, data, HG, surrogate_class, target_model, train_
         deg_penalty_val = degree_penalty.item()
         cls_loss_val = loss_cls.item()
         lap_dist_val = lap_dist.item() if isinstance(lap_dist, torch.Tensor) else lap_dist
-        loss_meta = lap_dist + degree_penalty + alpha * loss_cls
+        loss_meta = lap_dist - degree_penalty + alpha * loss_cls
 
         grads = torch.autograd.grad(loss_meta,[delta_H,delta_X])
 
@@ -388,7 +388,7 @@ def meta_laplacian_pois_attack(root, H, X, y, data, HG, surrogate_class, target_
         # lap_dist = torch.mean(delta_L**2)
         cls_loss_val = loss_cls.item()
         lap_dist_val = lap_dist.item() if isinstance(lap_dist, torch.Tensor) else lap_dist
-        loss_meta = lap_dist + degree_penalty + alpha * loss_cls
+        loss_meta = lap_dist - degree_penalty + alpha * loss_cls
 
         grads = torch.autograd.grad(loss_meta,[delta_H,delta_X])
 

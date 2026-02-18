@@ -1,9 +1,9 @@
 ## Overview
 
-This code is for the NeurIPS paper titled ``MeLA-D: Adversarial Attacks and Robust Training for
-Hypergraph Neural Networks via Meta Learning``
+This code is for the  paper titled ``Adversarial Attacks and Robust Training for
+Hypergraph Neural Networks``
 
-1. Running MeLA-FGSM and MeLA-D to attack various datasets: Execute on the terminal
+1. Running MeLA-FGSM and MeLA-PGD to attack various datasets: Execute on the terminal
 
 ```bash
 bash run.sh # To run HGNN, AllSetTransformer 

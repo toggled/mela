@@ -7,11 +7,11 @@ for dataset in "${array1[@]}"; do
         L="MSE"
     fi
     for j in "${seeds[@]}"; do
-        # python train_hypermlp.py --method MLP --dname $dataset --All_num_layers 2 --feature_noise 0.0 --MLP_hidden 512 --wd 0.0 --epochs 100 --runs 1 --cuda 0 --lr 0.001 --alpha 0.005 --ptb_rate 0.2 --dropout 0.1 --seed $j --display_step 100 --attack Rand-feat
-        # python train_hypermlp.py --method MLP --dname $dataset --All_num_layers 2 --feature_noise 0.0 --MLP_hidden 512 --wd 0.0 --epochs 100 --runs 1 --cuda 0 --lr 0.001 --alpha 0.005 --ptb_rate 0.2 --dropout 0.1 --seed $j --display_step 100 --attack Rand-flip 
+        python train_hypermlp.py --method MLP --dname $dataset --All_num_layers 2 --feature_noise 0.0 --MLP_hidden 512 --wd 0.0 --epochs 100 --runs 1 --cuda 0 --lr 0.001 --alpha 0.005 --ptb_rate 0.2 --dropout 0.1 --seed $j --display_step 100 --attack Rand-feat
+        python train_hypermlp.py --method MLP --dname $dataset --All_num_layers 2 --feature_noise 0.0 --MLP_hidden 512 --wd 0.0 --epochs 100 --runs 1 --cuda 0 --lr 0.001 --alpha 0.005 --ptb_rate 0.2 --dropout 0.1 --seed $j --display_step 100 --attack Rand-flip 
         python train_hypermlp.py --method MLP --dname $dataset --All_num_layers 2 --feature_noise 0.0 --MLP_hidden 512 --wd 0.0 --epochs 100 --runs 1 --cuda 0 --lr 0.001 --alpha 0.005 --ptb_rate 0.2 --dropout 0.1 --seed $j --display_step 100 --attack mla --T 30 --loss $L 
         python train_hypermlp.py --method MLP --dname $dataset --All_num_layers 2 --feature_noise 0.0 --MLP_hidden 512 --wd 0.0 --epochs 100 --runs 1 --cuda 1 --lr 0.001 --alpha 0.005 --ptb_rate 0.2 --dropout 0.1 --seed $j --display_step 100 --attack mla_fgsm 
-        # python train_hypermlp.py --method MLP --dname $dataset --All_num_layers 2 --feature_noise 0.0 --MLP_hidden 512 --wd 0.0 --epochs 100 --runs 1 --cuda 0 --lr 0.001 --alpha 0.005 --ptb_rate 0.2 --dropout 0.1 --seed $j --display_step 100 --attack gradargmax
+        python train_hypermlp.py --method MLP --dname $dataset --All_num_layers 2 --feature_noise 0.0 --MLP_hidden 512 --wd 0.0 --epochs 100 --runs 1 --cuda 0 --lr 0.001 --alpha 0.005 --ptb_rate 0.2 --dropout 0.1 --seed $j --display_step 100 --attack gradargmax
     done
 done 
 eps=0.05

@@ -20,3 +20,4 @@ train_hypermlpICML.py
 train_hypermlp_aaai.py
 run_old.sh
 runhmlp_old.sh
+runhmlp.sh

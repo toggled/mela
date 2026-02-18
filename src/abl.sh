@@ -1,8 +1,12 @@
 #!/bin/bash
 # ulimit -v $((100 * 1024 * 1024))  # 100 GB in KB
-dataset="cora"
+# dataset="citeseer"
+# dataset="cora"
+L="L2"
+# L="MSE"
+dataset="coauthor_cora"
 # Define two arrays
-t=0.25
+t=0.5
 seeds=(11 12)
 # for j in "${seeds[@]}"; do
 #     python ablation.py --method HGNN --dname $dataset \
@@ -26,10 +30,87 @@ seeds=(11 12)
 #     # python ablation.py --seed $j --epsilon 0.005  --num_epochs 1000 --eta_H 0.001 --eta_X 0.001 --T 30 --patience 150 --num_epochs_sur 50 --beta 1 --gamma 1
 # done
 for j in "${seeds[@]}"; do
-    python ablation.py --method HGNN --dname $dataset \
-        --All_num_layers 1 --MLP_num_layers 2 --feature_noise 0.0 --heads 1 --Classifier_num_layers 1 --MLP_hidden 512 \
-        --Classifier_hidden 256 --wd 0.0 --epochs 1000 --runs 1 --cuda 0 --lr 0.001 --perturb_type replace --perturb_prop 0 \
-        --seed $j --attack mla --alpha 0 --beta 0 --epsilon 0 --cuda 1 --train_prop $t &
+    # python ablation.py --method HGNN --dname $dataset \
+    #     --All_num_layers 1 --MLP_num_layers 2 --feature_noise 0.0 --heads 1 --Classifier_num_layers 1 --MLP_hidden 512 \
+    #     --Classifier_hidden 256 --wd 0.0 --epochs 1000 --runs 1 --lr 0.001 --perturb_type replace --perturb_prop 0 \
+    #     --seed $j --attack mla --alpha 0 --beta 0 --epsilon 0 --cuda 1 --train_prop $t &
+    # python ablation.py --method AllSetTransformer --dname $dataset \
+    # --heads 4 --All_num_layers 1 --MLP_num_layers 2 --feature_noise 0.0 --heads 1 --Classifier_num_layers 1 --MLP_hidden 256  \
+    # --Classifier_hidden 128 --wd 0.0 --epochs 1000 --runs 1 --lr 0.001 --perturb_type replace --perturb_prop 0  \
+    # --seed $j --attack mla --alpha 0 --beta 0 --epsilon 0 --cuda 0 --train_prop $t 
+# # degree constraint added
+#     python ablation.py --method HGNN --dname $dataset \
+#         --All_num_layers 1 --MLP_num_layers 2 --feature_noise 0.0 --heads 1 --Classifier_num_layers 1 --MLP_hidden 512 \
+#         --Classifier_hidden 256 --wd 0.0 --epochs 1000 --runs 1 --lr 0.001 --perturb_type replace --perturb_prop 0 \
+#         --seed $j --attack mla --alpha 0 --beta 1 --epsilon 0 --cuda 1 --train_prop $t &
+#     python ablation.py --method AllSetTransformer --dname $dataset \
+#     --heads 4 --All_num_layers 1 --MLP_num_layers 2 --feature_noise 0.0 --heads 1 --Classifier_num_layers 1 --MLP_hidden 256  \
+#     --Classifier_hidden 128 --wd 0.0 --epochs 1000 --runs 1 --lr 0.001 --perturb_type replace --perturb_prop 0  \
+#     --seed $j --attack mla --alpha 0 --beta 1 --epsilon 0 --cuda 0 --train_prop $t 
+# Laplacian constraint added
+    # alpha_values=(0 0.01 0.1)
+    # alpha_values=(1 2 4)
+    # alpha_values=(0 0.01 0.1 1 2 4)
+    if [ "$dataset" == "co-citeseer" ]; then
+        alpha_values=(0 1.0)
+    elif [ "$dataset" == "co-cora" ]; then
+        alpha_values=(0 4.0)
+    else
+        alpha_values=(1 2 4)
+    fi
+    for alpha in "${alpha_values[@]}"; do
+    #  python ablation.py --method HGNN --dname $dataset \
+    #         --All_num_layers 1 --MLP_num_layers 2 --feature_noise 0.0 --heads 1 --Classifier_num_layers 1 --MLP_hidden 512 \
+    #         --Classifier_hidden 256 --wd 0.0 --epochs 1000 --runs 1 --lr 0.001 --perturb_type replace --perturb_prop 0 \
+    #         --seed $j --attack mla_unrolled --alpha $alpha --beta 1 --gamma 4.0 --epsilon 0.05 --cuda 1 --train_prop $t --loss $L 
+        # python ablation.py --method HGNN --dname $dataset \
+        #     --All_num_layers 1 --MLP_num_layers 2 --feature_noise 0.0 --heads 1 --Classifier_num_layers 1 --MLP_hidden 512 \
+        #     --Classifier_hidden 256 --wd 0.0 --epochs 1000 --runs 1 --lr 0.001 --perturb_type replace --perturb_prop 0 \
+        #     --seed $j --attack mla_fgsm --alpha $alpha --beta 1 --gamma 4.0 --epsilon 0.05 --cuda 0 --train_prop $t --loss $L &
+        # python ablation.py --method HGNN --dname $dataset \
+        #     --All_num_layers 1 --MLP_num_layers 2 --feature_noise 0.0 --heads 1 --Classifier_num_layers 1 --MLP_hidden 512 \
+        #     --Classifier_hidden 256 --wd 0.0 --epochs 1000 --runs 1 --lr 0.001 --perturb_type replace --perturb_prop 0 \
+        #     --seed $j --attack mla_unrolled --alpha $alpha --beta 1 --epsilon 0 --cuda 0 --train_prop $t --loss $L  
+        python ablation.py --method HGNN --dname $dataset \
+            --All_num_layers 1 --MLP_num_layers 2 --feature_noise 0.0 --heads 1 --Classifier_num_layers 1 --MLP_hidden 512 \
+            --Classifier_hidden 256 --wd 0.0 --epochs 1000 --runs 1 --lr 0.001 --perturb_type replace --perturb_prop 0 \
+            --seed $j --attack mla --alpha $alpha --beta 1 --gamma 4.0 \
+            --epsilon 0.05 --cuda 2 --train_prop $t --loss $L --T 100 --eta_H 1e-3 --eta_X 1e-3 &
+        # python ablation.py --method AllSetTransformer --dname $dataset \
+        #     --heads 4 --All_num_layers 1 --MLP_num_layers 2 --feature_noise 0.0 --Classifier_num_layers 1 --MLP_hidden 256  \
+        #     --Classifier_hidden 128 --wd 0.0 --epochs 1000 --runs 1 --lr 0.001 --perturb_type replace --perturb_prop 0  \
+        #     --seed $j --attack mla --alpha $alpha --beta 1 --gamma 4.0 \
+        #     --epsilon 0.05 --cuda 3 --train_prop $t --loss $L --T 100 --eta_H 1e-3 --eta_X 1e-3 & 
+            python ablation.py --method HGNN --dname $dataset \
+            --All_num_layers 1 --MLP_num_layers 2 --feature_noise 0.0 --heads 1 --Classifier_num_layers 1 --MLP_hidden 512 \
+            --Classifier_hidden 256 --wd 0.0 --epochs 1000 --runs 1 --lr 0.001 --perturb_type replace --perturb_prop 0 \
+            --seed $j --attack mla --alpha $alpha --beta 1 --gamma 4.0 \
+            --epsilon 0.05 --cuda 2 --train_prop $t --T 100 --eta_H 1e-3 --eta_X 1e-3 &
+        # python ablation.py --method AllSetTransformer --dname $dataset \
+        #     --heads 4 --All_num_layers 1 --MLP_num_layers 2 --feature_noise 0.0 --Classifier_num_layers 1 --MLP_hidden 256  \
+        #     --Classifier_hidden 128 --wd 0.0 --epochs 1000 --runs 1 --lr 0.001 --perturb_type replace --perturb_prop 0  \
+        #     --seed $j --attack mla --alpha $alpha --beta 1 --gamma 4.0 \
+        #     --epsilon 0.05 --cuda 3 --train_prop $t --T 100 --eta_H 1e-3 --eta_X 1e-3
+
+        # python ablation.py --method AllSetTransformer --dname $dataset \
+        # --heads 4 --All_num_layers 1 --MLP_num_layers 2 --feature_noise 0.0 --Classifier_num_layers 1 --MLP_hidden 256  \
+        # --Classifier_hidden 128 --wd 0.0 --epochs 1000 --runs 1 --lr 0.001 --perturb_type replace --perturb_prop 0  \
+        # --seed $j --attack mla_fgsm --alpha $alpha --beta 1 --gamma 4.0 --epsilon 0.05 --cuda 1 --train_prop $t --loss $L
+
+        # python ablation.py --method AllSetTransformer --dname $dataset \
+        # --heads 4 --All_num_layers 1 --MLP_num_layers 2 --feature_noise 0.0 --Classifier_num_layers 1 --MLP_hidden 256  \
+        # --Classifier_hidden 128 --wd 0.0 --epochs 1000 --runs 1 --lr 0.001 --perturb_type replace --perturb_prop 0  \
+        # --seed $j --attack mla_unrolled --alpha $alpha --beta 1 --epsilon 0 --cuda 1 --train_prop $t --loss $L
+
+    done
+    # python ablation.py --method HGNN --dname $dataset \
+    #     --All_num_layers 1 --MLP_num_layers 2 --feature_noise 0.0 --heads 1 --Classifier_num_layers 1 --MLP_hidden 512 \
+    #     --Classifier_hidden 256 --wd 0.0 --epochs 1000 --runs 1 --lr 0.001 --perturb_type replace --perturb_prop 0 \
+    #     --seed $j --attack mla --alpha 10 --beta 1 --epsilon 0 --cuda 1 --train_prop $t &
+    # python ablation.py --method AllSetTransformer --dname $dataset \
+    # --heads 4 --All_num_layers 1 --MLP_num_layers 2 --feature_noise 0.0 --heads 1 --Classifier_num_layers 1 --MLP_hidden 256  \
+    # --Classifier_hidden 128 --wd 0.0 --epochs 1000 --runs 1 --lr 0.001 --perturb_type replace --perturb_prop 0  \
+    # --seed $j --attack mla --alpha 10 --beta 1 --epsilon 0 --cuda 0 --train_prop $t 
 
     # python ablation.py --method HGNN --dname $dataset \
     #     --All_num_layers 1 --MLP_num_layers 2 --feature_noise 0.0 --heads 1 --Classifier_num_layers 1 --MLP_hidden 512 \
@@ -57,6 +138,7 @@ for j in "${seeds[@]}"; do
     #     --Classifier_hidden 256 --wd 0.0 --epochs 1000 --runs 1 --cuda 0 --lr 0.001 --perturb_type replace --perturb_prop 0 \
     #     --seed $j --attack mla --alpha 10.0 --beta 2.0 --epsilon 0 --cuda 1 --train_prop $t
 done
+
 # for j in "${seeds[@]}"; do
 #     python ablation.py --method HGNN --dname $dataset \
 #         --All_num_layers 1 --MLP_num_layers 2 --feature_noise 0.0 --heads 1 --Classifier_num_layers 1 --MLP_hidden 512 \

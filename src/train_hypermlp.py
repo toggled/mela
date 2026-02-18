@@ -29,161 +29,339 @@ import sys
 # sys.path.append('../../')
 from mla_utils import *
 from modelzoo import SimpleHGNN,GradArgmax
+from torch.nn.utils.stateless import functional_call
 
-def meta_laplacian_FGSM(H, X, y, data, HG, surrogate_class, target_model, train_mask, val_mask, test_mask, logits_orig, budget=20, epsilon=0.05, T=20, eta_H=1e-2, eta_X=1e-2, alpha=4.0, reinit_if_stuck=True):
+
+# def meta_laplacian_FGSM(H, X, y, data, HG, surrogate_class, target_model, train_mask, val_mask, test_mask, logits_orig, budget=20, epsilon=0.05, T=20, eta_H=1e-2, eta_X=1e-2, alpha=4.0, reinit_if_stuck=True):
+#     """
+#       Meta Laplacian Attack adapted to poisoning setting (training-time). 
+#     - The attacker perturbs H and X before training.
+#     - A new model is trained from scratch at every iteration to simulte a bilevel optimization. 
+#     Params:
+#         H,X,y: Original incidence matrix, features and labels
+#         surrogate_class: Constructor of the surrogate model (e.g. SimpleHGNN)
+#     """
+#     verbose = False
+#     eta_H = args.ptb_rate 
+#     eta_X = args.epsilon
+#     device = X.device
+#     idx_unlabeled = val_mask | test_mask
+#     H = H.clone().detach()
+#     X = X.clone().detach()
+#     H.requires_grad = False
+#     X.requires_grad = False
+#     n, m = H.shape
+#     # Z = model(H, X).detach()
+#     L_orig = lap(H)
+#     dv_orig = H @ torch.ones((H.shape[1],), device=device)
+#     loss_meta_trajectory = []
+#     acc_drop_trajectory = []
+#     lap_shift_trajectory = []
+#     lap_dist_trajectory = []
+#     cls_loss_trajectory = []
+#     deg_penalty_trajectory = []
+#     feature_shift_trajectory = []
+#     surrogate_test_trajectory = []
+#     target_test_trajectory = []
+#     # Surrogate model training
+#     if surrogate_class is None:
+#         surrogate_model = SimpleHGNN(X.shape[1], hidden_dim = args.MLP_hidden, out_dim = args.num_classes, device = X.device).to(device)
+#         optimizer = torch.optim.Adam(surrogate_model.parameters(),lr=args.lr)
+#     else:
+#         # surrogate_model = surrogate_class(X.shape[1],)
+#         raise Exception("Other surrogates Not implemented")
+#     criterion = nn.CrossEntropyLoss()
+#     best_val_accuracy = -float('inf')
+#     best_model_state = None
+#     surrogate_epochs = args.num_epochs_sur
+#     for epoch in range(surrogate_epochs):
+#         surrogate_model.train()
+#         optimizer.zero_grad()
+#         logits = surrogate_model(X, H)
+#         # print(logits[train_mask].shape,y[train_mask].shape,logits.shape,y.shape)
+#         loss = criterion(logits[train_mask],y[train_mask])
+#         loss.backward(retain_graph=True)
+#         optimizer.step()
+#         surrogate_model.eval()
+#         # Save the surrogate model (which has the best validation accuracy) for robust training
+#         with torch.no_grad():   
+#             # val_loss = criterion(logits[val_mask], y[val_mask])
+#             val_accuracy = accuracy(logits[val_mask],y[val_mask])
+#         if val_accuracy.item() > best_val_accuracy:
+#             best_val_accuracy = val_accuracy.item()
+#             # print('Best val accuracy: ',best_val_accuracy)
+#             best_model_state = surrogate_model.state_dict()
+
+#         if epoch%20 == 0 and verbose:
+#             print('Epoch: ',epoch)
+#             print("Surr Loss : ",loss.item())
+#     surrogate_model.load_state_dict(best_model_state) # Take the best model
+#     with torch.no_grad():
+#         surrogate_model.eval()
+#         Z_orig = surrogate_model(X, H) # Trained surrogate model
+#     lap_dist = torch.tensor(0.0).to(device)
+#     degree_penalty = torch.tensor(0.0).to(device)
+#     loss_cls = torch.tensor(0.0).to(device)
+#     for t in tqdm(range(T)):
+#         runtime_start = time.time()
+#         delta_H = (torch.randn_like(H)).requires_grad_()
+#         delta_X = (torch.randn_like(X)).requires_grad_()
+#         H_pert = torch.clamp(H + delta_H, 0, 1)
+#         X_pert = X + delta_X
+#         L_pert = lap(H_pert)
+#         Z_pert = surrogate_model(X_pert, H_pert)
+#         delta_L = (L_pert@Z_pert - L_orig @ Z_orig)
+#         # lap_dist += torch.mean((delta_L**2))/T
+#         lap_dist += torch.norm(delta_L, p=2).mean()/T
+
+#         dv_temp = H_pert @ torch.ones((H.shape[1],), device=device)
+#         degree_violation = (dv_temp - dv_orig)
+#         degree_penalty += (torch.sum(degree_violation ** 2) / n)/T
+#         # degree_penalty = torch.abs(degree_violation).mean()
+#         logits_adv = Z_pert
+#         loss_cls += (F.cross_entropy(logits_adv, y))/T
+#         time1 = time.time() - runtime_start
+
+#         # with torch.no_grad():
+#         #     target_model.eval()
+#         #     surrogate_model.eval()
+#         #     surrogate_test_accuracy = accuracy(surrogate_model(X_pert, H_pert)[test_mask], y[test_mask]) 
+#         #     target_model_test_accuracy = accuracy(target_model(X_pert, H_pert)[test_mask], y[test_mask])
+#         #     surrogate_test_trajectory.append(surrogate_test_accuracy.item())
+#         #     target_test_trajectory.append(target_model_test_accuracy.item())
+#         # if t == T-1:
+#         #     os.makedirs(os.path.join(root,str(args.seed)), exist_ok=True)
+#         #     prefix = os.path.join(root,str(args.seed), 'SimpleHGNN_'+args.dataset+'_'+args.model+'_'+str(args.ptb_rate))
+#         #     torch.save(best_model_state, prefix+'_weights.pth')
+#         runtime_start2 = time.time()
+
+#         deg_penalty_val = degree_penalty.item()
+#         cls_loss_val = loss_cls.item()
+#         lap_dist_val = lap_dist.item() if isinstance(lap_dist, torch.Tensor) else lap_dist
+#         loss_meta = lap_dist - degree_penalty + alpha * loss_cls
+
+#         grads = torch.autograd.grad(loss_meta,[delta_H,delta_X])
+
+#         lap_dist_trajectory.append(lap_dist_val)
+#         loss_meta_trajectory.append(loss_meta.item())
+#         # _, _, acc_drop = classification_drop(args,target_model, H, HG, X, H_pert, X_pert, y)
+#         with torch.no_grad():
+#             target_model.eval()
+#             # _, _, acc_drop = classification_drop(args,target_model, H, HG, X, H_pert, X_pert, y)
+#             logits_adv,_ = target_model(data)
+#         acc_orig = (logits_orig.argmax(dim=1)[test_mask] == y[test_mask]).float().mean().item()
+#         acc_adv = (logits_adv.argmax(dim=1)[test_mask] == y[test_mask]).float().mean().item()
+#         acc_drop = (acc_orig - acc_adv)/acc_orig
+#         acc_drop_trajectory.append(acc_drop)
+#         cls_loss_trajectory.append(cls_loss_val)
+#         deg_penalty_trajectory.append(deg_penalty_val)
+#         lap_diff = laplacian_diff(H, torch.clamp(H + delta_H, 0, 1))
+#         feature_shift = torch.norm(delta_X, p=2).item()
+#         lap_shift_trajectory.append(lap_diff)
+#         feature_shift_trajectory.append(feature_shift)
+
+#         # Proceed with original gradient ascent
+#         delta_H = eta_H * grads[0].sign()
+#         delta_X = eta_X * grads[1].sign()
+#         flat = delta_H.abs().flatten()
+#         topk = torch.topk(flat, k=min(delta_H.numel(), budget)).indices
+#         delta_H_new = torch.zeros_like(delta_H)
+#         delta_H_new.view(-1)[topk] = delta_H.view(-1)[topk]
+#         # In the following code segment we do not update bad nodes (nodes whose deg <= 0 ) or bad edges (whose card <= 1)
+#         H_temp = torch.clamp(H + delta_H_new, 0, 1)
+#         row_degrees = H_temp.sum(dim=1)
+#         col_degrees = H_temp.sum(dim=0)
+#         bad_nodes = (row_degrees < 1).nonzero(as_tuple=True)[0]
+#         bad_edges = (col_degrees < 2).nonzero(as_tuple=True)[0]
+#         delta_H_new[bad_nodes, :] = 0
+#         delta_H_new[:, bad_edges] = 0
+#         delta_H.copy_(delta_H_new)
+
+#         delta_X = delta_X.clamp(-epsilon, epsilon)
+#         time2 = time.time() - runtime_start2
+#     # results = [(t, loss_meta, acc_drop, lap_shift, deg_penalty, cls_loss, lap_dist, feature_shift)]
+#     results = [loss_meta_trajectory, acc_drop_trajectory, lap_shift_trajectory, lap_dist_trajectory, cls_loss_trajectory, \
+#                deg_penalty_trajectory,feature_shift_trajectory,surrogate_test_trajectory, target_test_trajectory]
+#     # mask = filter_potential_singletons(torch.clamp(H + delta_H, 0, 1))
+#     return torch.clamp(H + delta_H, 0, 1), X + delta_X, results, time1+time2, best_model_state
+
+
+def meta_laplacian_FGSM(
+    args, H, X, y, data, HG, surrogate_class, target_model,
+    train_mask, val_mask, test_mask, logits_orig,
+    budget=20, epsilon=0.05,  T=-1,          
+    eta_H=1e-2, eta_X=1e-2,           
+    reinit_if_stuck=True, verbose = False):
     """
-      Meta Laplacian Attack adapted to poisoning setting (training-time). 
-    - The attacker perturbs H and X before training.
-    - A new model is trained from scratch at every iteration to simulte a bilevel optimization. 
-    Params:
-        H,X,y: Original incidence matrix, features and labels
-        surrogate_class: Constructor of the surrogate model (e.g. SimpleHGNN)
+    Clean MeLA-FGSM (single-step) poisoning attack.
     """
-    verbose = False
-    eta_H = args.ptb_rate 
-    eta_X = args.epsilon
+    alpha, beta,gamma = args.alpha, args.beta, args.gamma
     device = X.device
-    idx_unlabeled = val_mask | test_mask
     H = H.clone().detach()
     X = X.clone().detach()
-    H.requires_grad = False
-    X.requires_grad = False
+
     n, m = H.shape
-    # Z = model(H, X).detach()
+
+    # Precompute originals
     L_orig = lap(H)
-    dv_orig = H @ torch.ones((H.shape[1],), device=device)
-    loss_meta_trajectory = []
-    acc_drop_trajectory = []
-    lap_shift_trajectory = []
-    lap_dist_trajectory = []
-    cls_loss_trajectory = []
-    deg_penalty_trajectory = []
-    feature_shift_trajectory = []
-    surrogate_test_trajectory = []
-    target_test_trajectory = []
-    # Surrogate model training
+    dv_orig = H @ torch.ones((m,), device=device)
+
+    # -------------------------
+    # 1) Train surrogate once
+    # -------------------------
     if surrogate_class is None:
-        surrogate_model = SimpleHGNN(X.shape[1], hidden_dim = args.MLP_hidden, out_dim = args.num_classes, device = X.device).to(device)
-        optimizer = torch.optim.Adam(surrogate_model.parameters(),lr=args.lr)
+        surrogate_model = SimpleHGNN(
+            X.shape[1], hidden_dim=args.MLP_hidden, out_dim=args.num_classes, device=device
+        ).to(device)
     else:
-        # surrogate_model = surrogate_class(X.shape[1],)
+        # surrogate_model = surrogate_class(...).to(device)  # if you ever implement this
         raise Exception("Other surrogates Not implemented")
+    optimizer = torch.optim.Adam(surrogate_model.parameters(), lr=args.lr)
     criterion = nn.CrossEntropyLoss()
-    best_val_accuracy = -float('inf')
-    best_model_state = None
-    surrogate_epochs = args.num_epochs_sur
-    for epoch in range(surrogate_epochs):
+
+    best_val = -float('inf')
+    best_state = None
+
+    for epoch in range(args.num_epochs_sur):
         surrogate_model.train()
         optimizer.zero_grad()
         logits = surrogate_model(X, H)
-        # print(logits[train_mask].shape,y[train_mask].shape,logits.shape,y.shape)
-        loss = criterion(logits[train_mask],y[train_mask])
+        loss = criterion(logits[train_mask], y[train_mask])
         loss.backward(retain_graph=True)
         optimizer.step()
-        surrogate_model.eval()
-        # Save the surrogate model (which has the best validation accuracy) for robust training
-        with torch.no_grad():   
-            # val_loss = criterion(logits[val_mask], y[val_mask])
-            val_accuracy = accuracy(logits[val_mask],y[val_mask])
-        if val_accuracy.item() > best_val_accuracy:
-            best_val_accuracy = val_accuracy.item()
-            # print('Best val accuracy: ',best_val_accuracy)
-            best_model_state = surrogate_model.state_dict()
 
+        surrogate_model.eval()
+        with torch.no_grad():
+            logits_val = surrogate_model(X, H)
+            val_acc = accuracy(logits_val[val_mask], y[val_mask]).item()
+        if val_acc > best_val:
+            best_val = val_acc
+            best_state = surrogate_model.state_dict() # {k: v.detach().clone() for k, v in surrogate_model.state_dict().items()}
+        
         if epoch%20 == 0 and verbose:
-            print('Epoch: ',epoch)
-            print("Surr Loss : ",loss.item())
-    surrogate_model.load_state_dict(best_model_state) # Take the best model
+            print('Epoch: ',epoch, " Surr Loss : ",loss.item())
+    if best_state is not None:
+        surrogate_model.load_state_dict(best_state)
+
+    # surrogate_model.eval()
     with torch.no_grad():
         surrogate_model.eval()
         Z_orig = surrogate_model(X, H) # Trained surrogate model
-    lap_dist = torch.tensor(0.0).to(device)
-    degree_penalty = torch.tensor(0.0).to(device)
-    loss_cls = torch.tensor(0.0).to(device)
-    for t in tqdm(range(T)):
-        runtime_start = time.time()
-        delta_H = (torch.randn_like(H)).requires_grad_()
-        delta_X = (torch.randn_like(X)).requires_grad_()
-        H_pert = torch.clamp(H + delta_H, 0, 1)
-        X_pert = X + delta_X
-        L_pert = lap(H_pert)
-        Z_pert = surrogate_model(X_pert, H_pert)
-        delta_L = (L_pert@Z_pert - L_orig @ Z_orig)
-        # lap_dist += torch.mean((delta_L**2))/T
-        lap_dist += torch.norm(delta_L, p=2).mean()/T
+    # -------------------------
+    # 2) One-step meta objective
+    # -------------------------
+    # Single-step variables (start from 0 for FGSM)
+    runtime_start = time.time()
+    delta_H = torch.zeros_like(H, device=device, requires_grad=True)
+    delta_X = torch.zeros_like(X, device=device, requires_grad=True)
 
-        dv_temp = H_pert @ torch.ones((H.shape[1],), device=device)
-        degree_violation = (dv_temp - dv_orig)
-        degree_penalty += (torch.sum(degree_violation ** 2) / n)/T
-        # degree_penalty = torch.abs(degree_violation).mean()
-        logits_adv = Z_pert
-        loss_cls += (F.cross_entropy(logits_adv, y))/T
-        time1 = time.time() - runtime_start
+    H_pert = torch.clamp(H + delta_H, 0.0, 1.0)  # continuous relaxation
+    X_pert = X + delta_X
 
-        # with torch.no_grad():
-        #     target_model.eval()
-        #     surrogate_model.eval()
-        #     surrogate_test_accuracy = accuracy(surrogate_model(X_pert, H_pert)[test_mask], y[test_mask]) 
-        #     target_model_test_accuracy = accuracy(target_model(X_pert, H_pert)[test_mask], y[test_mask])
-        #     surrogate_test_trajectory.append(surrogate_test_accuracy.item())
-        #     target_test_trajectory.append(target_model_test_accuracy.item())
-        # if t == T-1:
-        #     os.makedirs(os.path.join(root,str(args.seed)), exist_ok=True)
-        #     prefix = os.path.join(root,str(args.seed), 'SimpleHGNN_'+args.dataset+'_'+args.model+'_'+str(args.ptb_rate))
-        #     torch.save(best_model_state, prefix+'_weights.pth')
-        runtime_start2 = time.time()
+    L_pert = lap(H_pert)
+    Z_pert = surrogate_model(X_pert, H_pert)
 
-        deg_penalty_val = degree_penalty.item()
-        cls_loss_val = loss_cls.item()
-        lap_dist_val = lap_dist.item() if isinstance(lap_dist, torch.Tensor) else lap_dist
-        loss_meta = lap_dist + degree_penalty + alpha * loss_cls
+    # Laplacian embedding drift: (L' - L) Z
+    # delta_L = (L_pert - L_orig) @ Z_pert
+    delta_L = (L_pert@Z_pert - L_orig @ Z_orig)
+    # lap_dist = torch.norm(delta_L, p="fro")  # stable choice; you can switch to p=2 if desired
+    # lap_dist = torch.norm(delta_L, p=2).mean() # Do ablation with this.
+    lap_dist = (delta_L**2).mean()
+    # Degree drift penalty
+    dv_temp = H_pert @ torch.ones((m,), device=device)
+    degree_penalty = torch.sum((dv_temp - dv_orig) ** 2) / n
 
-        grads = torch.autograd.grad(loss_meta,[delta_H,delta_X])
+    # Classification (poisoning): use TRAIN labels only
+    loss_cls = F.cross_entropy(Z_pert[train_mask], y[train_mask])
 
-        lap_dist_trajectory.append(lap_dist_val)
-        loss_meta_trajectory.append(loss_meta.item())
-        # _, _, acc_drop = classification_drop(args,target_model, H, HG, X, H_pert, X_pert, y)
-        with torch.no_grad():
-            target_model.eval()
-            # _, _, acc_drop = classification_drop(args,target_model, H, HG, X, H_pert, X_pert, y)
-            logits_adv,_ = target_model(data)
-        acc_orig = (logits_orig.argmax(dim=1)[test_mask] == y[test_mask]).float().mean().item()
-        acc_adv = (logits_adv.argmax(dim=1)[test_mask] == y[test_mask]).float().mean().item()
-        acc_drop = (acc_orig - acc_adv)/acc_orig
-        acc_drop_trajectory.append(acc_drop)
-        cls_loss_trajectory.append(cls_loss_val)
-        deg_penalty_trajectory.append(deg_penalty_val)
-        lap_diff = laplacian_diff(H, torch.clamp(H + delta_H, 0, 1))
-        feature_shift = torch.norm(delta_X, p=2).item()
-        lap_shift_trajectory.append(lap_diff)
-        feature_shift_trajectory.append(feature_shift)
+    # Meta objective (maximize)
+    loss_meta = alpha*lap_dist - beta*degree_penalty + gamma * loss_cls
 
-        # Proceed with original gradient ascent
-        delta_H = eta_H * grads[0].sign()
-        delta_X = eta_X * grads[1].sign()
-        flat = delta_H.abs().flatten()
-        topk = torch.topk(flat, k=min(delta_H.numel(), budget)).indices
-        delta_H_new = torch.zeros_like(delta_H)
-        delta_H_new.view(-1)[topk] = delta_H.view(-1)[topk]
-        # In the following code segment we do not update bad nodes (nodes whose deg <= 0 ) or bad edges (whose card <= 1)
-        H_temp = torch.clamp(H + delta_H_new, 0, 1)
-        row_degrees = H_temp.sum(dim=1)
-        col_degrees = H_temp.sum(dim=0)
-        bad_nodes = (row_degrees < 1).nonzero(as_tuple=True)[0]
-        bad_edges = (col_degrees < 2).nonzero(as_tuple=True)[0]
-        delta_H_new[bad_nodes, :] = 0
-        delta_H_new[:, bad_edges] = 0
-        delta_H.copy_(delta_H_new)
+    # -------------------------
+    # 3) FGSM update (single step)
+    # -------------------------
+    grads = torch.autograd.grad(loss_meta, [delta_H, delta_X])
 
-        delta_X = delta_X.clamp(-epsilon, epsilon)
-        time2 = time.time() - runtime_start2
-    # results = [(t, loss_meta, acc_drop, lap_shift, deg_penalty, cls_loss, lap_dist, feature_shift)]
-    results = [loss_meta_trajectory, acc_drop_trajectory, lap_shift_trajectory, lap_dist_trajectory, cls_loss_trajectory, \
-               deg_penalty_trajectory,feature_shift_trajectory,surrogate_test_trajectory, target_test_trajectory]
-    # mask = filter_potential_singletons(torch.clamp(H + delta_H, 0, 1))
-    return torch.clamp(H + delta_H, 0, 1), X + delta_X, results, time1+time2, best_model_state
+    # score = grads[0].abs().flatten()
+    # k = min(int(budget), score.numel())
+    # topk_idx = torch.topk(score, k=k, largest=True).indices
 
-def meta_laplacian_pois_attack(root, H, X, y, data, HG, surrogate_class, target_model, train_mask, val_mask, test_mask, logits_orig, budget=20, epsilon=0.05, T=20, eta_H=1e-2, eta_X=1e-2, alpha=4.0, reinit_if_stuck=True):
+    # # H step: sign(grad) + top-k projection to enforce budget
+    # delta_H_step = 1 * grads[0].sign()
+    # delta_H_sparse = torch.zeros_like(delta_H_step)
+    # delta_H_sparse.view(-1)[topk_idx] = delta_H_step.view(-1)[topk_idx]
+    # # print('max(), min(): ',delta_H_sparse.max(), delta_H_sparse.min())
+    # # delta_H_sparse has -1/0/+1; convert to mask of selected entries
+    # M = (delta_H_sparse != 0).float()   # {0,1}
+
+    # # exact flip on selected entries
+    # H_adv = H + (1 - 2*H) * M
+    # # (optional) if H might not be perfectly binary:
+    # H_adv = (H_adv > 0.5).float()
+
+    gH = grads[0]
+    flip_gain = (1 - 2*H) * gH          # positive => flipping increases loss_meta
+    eligible = (flip_gain > 0)
+
+    score = flip_gain.clone()
+    score[~eligible] = -float("inf")
+
+    flat = score.flatten()
+    k = min(budget, flat.numel())
+    topk_idx = torch.topk(flat, k=k).indices
+
+    M = torch.zeros_like(flat)
+    M[topk_idx] = 1.0
+    M = M.view_as(H)
+
+    H_adv = H + (1 - 2*H) * M
+    H_adv = (H_adv > 0.5).float()
+
+    # # Optional: avoid invalid nodes/edges (same logic as your code)
+    # H_temp = torch.clamp(H + delta_H_sparse, 0.0, 1.0)
+    # row_degrees = H_temp.sum(dim=1)
+    # col_degrees = H_temp.sum(dim=0)
+
+    # bad_nodes = (row_degrees < 1).nonzero(as_tuple=True)[0]
+    # # NOTE: keep your dataset rule if needed; here we keep the common "<2" for hyperedges
+    # if args.dataset == '20newsW100':
+    #     bad_edges = (col_degrees < 1).nonzero(as_tuple=True)[0]
+    # else:
+    #     bad_edges = (col_degrees < 2).nonzero(as_tuple=True)[0]
+
+
+    # delta_H_sparse[bad_nodes, :] = 0
+    # delta_H_sparse[:, bad_edges] = 0
+    # print(grads[1].max(), grads[1].min(), grads[1].mean())
+    # X step: l_inf FGSM + clamp to epsilon
+    delta_X_step = epsilon * grads[1].sign()
+    # delta_X_step = delta_X_step.clamp(-epsilon, epsilon)
+
+    # Discretize H with your existing helper (0/1 with budget)
+    # H_adv =  torch.clamp(H + delta_H_sparse, 0, 1)
+
+    # Feature perturbation final
+    X_adv = X + delta_X_step.detach()
+    time_elapsed = time.time() - runtime_start
+    # -------------------------
+    # (Optional) quick diagnostics (single-step)
+    # -------------------------
+    with torch.no_grad():
+        # report effective budget usage
+        num_changed = (H_adv != H).sum().item()
+
+    results = {
+        "loss_meta": float(loss_meta.detach().cpu()),
+        "lap_dist": float(lap_dist.detach().cpu()),
+        "degree_penalty": float(degree_penalty.detach().cpu()),
+        "loss_cls_train": float(loss_cls.detach().cpu()),
+        "num_changed_H": int(num_changed),
+        "best_val_acc_surrogate": float(best_val),
+    }
+
+    return H_adv, X_adv, results, time_elapsed, best_state
+
+def meta_laplacian_pois_attack(args, root, H, X, y, data, HG, surrogate_class, target_model, train_mask, val_mask, test_mask, logits_orig, budget=20, epsilon=0.05, T=20, eta_H=1e-2, eta_X=1e-2, reinit_if_stuck=True):
     """
       Meta Laplacian Attack adapted to poisoning setting (training-time). 
     - The attacker perturbs H and X before training.
@@ -192,6 +370,7 @@ def meta_laplacian_pois_attack(root, H, X, y, data, HG, surrogate_class, target_
         H,X,y: Original incidence matrix, features and labels
         surrogate_class: Constructor of the surrogate model (e.g. SimpleHGNN)
     """
+    alpha, beta,gamma = args.alpha, args.beta, args.gamma
     verbose = False
     device = X.device
     idx_unlabeled = val_mask | test_mask
@@ -222,20 +401,23 @@ def meta_laplacian_pois_attack(root, H, X, y, data, HG, surrogate_class, target_
         else:
             # surrogate_model = surrogate_class(X.shape[1],)
             raise Exception("Other surrogates Not implemented")
+        # M = (delta_H != 0).float()
+        # # exact flip on selected entries
+        # H_pert = H + (1 - 2*H) * M
         H_pert = torch.clamp(H + delta_H, 0, 1)
         X_pert = X + delta_X
         L_pert = lap(H_pert)
         # for epoch in tqdm(range(args.num_epochs),desc = 'Training surrogate: iter = '+str(t)):
         criterion = nn.CrossEntropyLoss()
-        best_val_accuracy = -float('inf')
-        best_model_state = None
-        if t == T-1:
-            surrogate_epochs = args.epochs 
-        else:
-            surrogate_epochs = args.num_epochs_sur
+        # best_val_accuracy = -float('inf')
+        # best_model_state = None
+        # if t == T-1:
+        #     surrogate_epochs = args.epochs 
+        # else:
+        #     surrogate_epochs = args.num_epochs_sur
         data.x = X_pert
         data.edge_index = incidence_to_edge_index(H_pert)
-        for epoch in range(surrogate_epochs):
+        for epoch in range(args.num_epochs_sur):
             surrogate_model.train()
             optimizer.zero_grad()
             logits = surrogate_model(X_pert, H_pert)
@@ -243,16 +425,16 @@ def meta_laplacian_pois_attack(root, H, X, y, data, HG, surrogate_class, target_
             loss = criterion(logits[train_mask],y[train_mask])
             loss.backward(retain_graph=True)
             optimizer.step()
-            if t == T-1:
-                surrogate_model.eval()
-                # Save the surrogate model (which has the best validation accuracy) for robust training
-                with torch.no_grad():   
-                    # val_loss = criterion(logits[val_mask], y[val_mask])
-                    val_accuracy = accuracy(logits[val_mask],y[val_mask])
-                if val_accuracy.item() > best_val_accuracy:
-                    best_val_accuracy = val_accuracy.item()
-                    # print('Best val accuracy: ',best_val_accuracy)
-                    best_model_state = surrogate_model.state_dict()
+            # if t == T-1:
+            #     surrogate_model.eval()
+            #     # Save the surrogate model (which has the best validation accuracy) for robust training
+            #     with torch.no_grad():   
+            #         # val_loss = criterion(logits[val_mask], y[val_mask])
+            #         val_accuracy = accuracy(logits[val_mask],y[val_mask])
+            #     if val_accuracy.item() > best_val_accuracy:
+            #         best_val_accuracy = val_accuracy.item()
+            #         # print('Best val accuracy: ',best_val_accuracy)
+            #         best_model_state = surrogate_model.state_dict()
 
             if epoch%20 == 0 and verbose:
                 print('Epoch: ',epoch)
@@ -266,8 +448,8 @@ def meta_laplacian_pois_attack(root, H, X, y, data, HG, surrogate_class, target_
                 _, _, acc_drop_sur = classification_drop(args,surrogate_model, H, None, X, H_pert, X_pert, y)
                 print("Surr Loss : ",loss.item()," Accuracy drop (surrogate): ", acc_drop_sur*100,'%', " Accuracy drop (target): ", acc_drop*100,'%')
         time1 = time.time() - runtime_start
-        if t == T-1:
-            surrogate_model.load_state_dict(best_model_state) # Take the best model
+        # if t == T-1:
+        #     surrogate_model.load_state_dict(best_model_state) # Take the best model
         with torch.no_grad():
             target_model.eval()
             surrogate_model.eval()
@@ -279,13 +461,14 @@ def meta_laplacian_pois_attack(root, H, X, y, data, HG, surrogate_class, target_
         if t == T-1:
             os.makedirs(os.path.join(root,str(args.seed)), exist_ok=True)
             prefix = os.path.join(root,str(args.seed), 'SimpleHGNN_'+args.dataset+'_'+args.model+'_'+str(args.ptb_rate))
-            torch.save(best_model_state, prefix+'_weights.pth')
+            # torch.save(best_model_state, prefix+'_weights.pth')
         runtime_start2 = time.time()
+        Z_orig = surrogate_model(X, H) # Trained surrogate model on unperturbed X,H
         Z = surrogate_model(X_pert, H_pert) # Trained surrogate model
-        delta_L = (L_pert - L_orig) @ Z
+        delta_L = (L_pert @ Z- L_orig @ Z_orig)
         # loss_meta = (delta_L**2).sum()
-        H_temp = torch.clamp(H + delta_H, 0, 1)
-        dv_temp = H_temp @ torch.ones((H.shape[1],), device=device)
+        # H_temp = torch.clamp(H + delta_H, 0, 1)
+        dv_temp = H_pert @ torch.ones((H.shape[1],), device=device)
         degree_violation = (dv_temp - dv_orig)
         degree_penalty = torch.sum(degree_violation ** 2) / n
         # degree_penalty = torch.abs(degree_violation).mean()
@@ -294,15 +477,17 @@ def meta_laplacian_pois_attack(root, H, X, y, data, HG, surrogate_class, target_
 
         # logits_adv = target_model(X_pert,H_pert)
         logits_adv = Z
-        loss_cls = F.cross_entropy(logits_adv, y)
+        loss_cls = F.cross_entropy(logits_adv[train_mask], y[train_mask])
         # loss_cls = F.cross_entropy(logits_adv, model(H, X).argmax(dim=1))
-        # lap_dist = (delta_L**2).sum()
-        lap_dist = torch.norm(delta_L, p=2).mean()
+        if args.loss == 'L2':
+            lap_dist = torch.norm(delta_L, p=2)
+        else:
+            lap_dist = (delta_L**2).mean()
+         
         # print(delta_L.shape)
-        # lap_dist = torch.mean(delta_L**2)
         cls_loss_val = loss_cls.item()
         lap_dist_val = lap_dist.item() if isinstance(lap_dist, torch.Tensor) else lap_dist
-        loss_meta = lap_dist + degree_penalty + alpha * loss_cls
+        loss_meta = alpha*lap_dist - beta*degree_penalty + gamma * loss_cls
 
         grads = torch.autograd.grad(loss_meta,[delta_H,delta_X])
 
@@ -331,14 +516,14 @@ def meta_laplacian_pois_attack(root, H, X, y, data, HG, surrogate_class, target_
             topk = torch.topk(flat, k=min(delta_H.numel(), budget)).indices
             delta_H_new = torch.zeros_like(delta_H)
             delta_H_new.view(-1)[topk] = delta_H.view(-1)[topk]
-            # In the following code segment we do not update bad nodes (nodes whose deg <= 0 ) or bad edges (whose card <= 1)
-            H_temp = torch.clamp(H + delta_H_new, 0, 1)
-            row_degrees = H_temp.sum(dim=1)
-            col_degrees = H_temp.sum(dim=0)
-            bad_nodes = (row_degrees < 1).nonzero(as_tuple=True)[0]
-            bad_edges = (col_degrees < 2).nonzero(as_tuple=True)[0]
-            delta_H_new[bad_nodes, :] = 0
-            delta_H_new[:, bad_edges] = 0
+            # # In the following code segment we do not update bad nodes (nodes whose deg <= 0 ) or bad edges (whose card <= 1)
+            # H_temp = torch.clamp(H + delta_H_new, 0, 1)
+            # row_degrees = H_temp.sum(dim=1)
+            # col_degrees = H_temp.sum(dim=0)
+            # bad_nodes = (row_degrees < 1).nonzero(as_tuple=True)[0]
+            # bad_edges = (col_degrees < 2).nonzero(as_tuple=True)[0]
+            # delta_H_new[bad_nodes, :] = 0
+            # delta_H_new[:, bad_edges] = 0
             delta_H.copy_(delta_H_new)
 
         delta_X = delta_X.clamp(-epsilon, epsilon)
@@ -347,7 +532,406 @@ def meta_laplacian_pois_attack(root, H, X, y, data, HG, surrogate_class, target_
     results = [loss_meta_trajectory, acc_drop_trajectory, lap_shift_trajectory, lap_dist_trajectory, cls_loss_trajectory, \
                deg_penalty_trajectory,feature_shift_trajectory,surrogate_test_trajectory, target_test_trajectory]
     # mask = filter_potential_singletons(torch.clamp(H + delta_H, 0, 1))
-    return torch.clamp(H + delta_H, 0, 1), X + delta_X, results, time1+time2, best_model_state
+    # print(acc_drop_trajectory)
+    M = (delta_H != 0).float()
+    # exact flip on selected entries
+    H_adv = H + (1 - 2*H) * M
+    # (optional) if H might not be perfectly binary:
+    H_adv = (H_adv > 0.5).float()
+    return H_adv.detach(), X + delta_X.detach(), results, time1+time2, None
+
+def _clone_params(model: nn.Module):
+    return {k: v.detach().clone().requires_grad_(True)
+            for k, v in model.named_parameters()}
+
+# def _sgd_step(params: dict, grads: list, lr: float):
+#     """Differentiable SGD update: p <- p - lr * g"""
+#     out = {}
+#     for (k, p), g in zip(params.items(), grads):
+#         out[k] = p - lr * g
+#     return out
+
+def init_adam_state(params: dict):
+    return {
+        k: {
+            "m": torch.zeros_like(v),
+            "v": torch.zeros_like(v),
+            "step": 0,
+        }
+        for k, v in params.items()
+    }
+
+def _adam_step(
+    params: dict,
+    grads: list,
+    opt_state: dict,
+    lr: float,
+    betas=(0.9, 0.999),
+    eps=1e-8,
+    weight_decay=0.0,
+):
+    """
+    Differentiable Adam update (functional).
+
+    params:     dict[name -> tensor]
+    grads:      list of gradients (aligned with params.values())
+    opt_state:  dict[name -> {'m', 'v', 'step'}]
+    returns:
+        new_params, new_opt_state
+    """
+    beta1, beta2 = betas
+    new_params = {}
+    new_state = {}
+
+    for (name, p), g in zip(params.items(), grads):
+        state = opt_state[name]
+
+        m = state["m"]
+        v = state["v"]
+        t = state["step"] + 1
+
+        if weight_decay != 0:
+            g = g + weight_decay * p
+
+        # Adam moments
+        m_new = beta1 * m + (1 - beta1) * g
+        v_new = beta2 * v + (1 - beta2) * (g * g)
+
+        # Bias correction
+        m_hat = m_new / (1 - beta1 ** t)
+        v_hat = v_new / (1 - beta2 ** t)
+
+        # Parameter update
+        p_new = p - lr * m_hat / (v_hat.sqrt() + eps)
+
+        new_params[name] = p_new
+        new_state[name] = {
+            "m": m_new,
+            "v": v_new,
+            "step": t,
+        }
+
+    return new_params, new_state
+
+def meta_laplacian_pois_attack_unrolled(args, root, H, X, y, data, HG, surrogate_class, target_model, train_mask, val_mask, test_mask, logits_orig, budget=20, epsilon=0.05, T=20, eta_H=1e-2, eta_X=1e-2, reinit_if_stuck=True):
+    """
+      Meta Laplacian Attack adapted to poisoning setting (training-time). 
+    - The attacker perturbs H and X before training.
+    - A new model is trained from scratch at every iteration to simulte a bilevel optimization. 
+    Params:
+        H,X,y: Original incidence matrix, features and labels
+        surrogate_class: Constructor of the surrogate model (e.g. SimpleHGNN)
+    """
+    alpha, beta,gamma = args.alpha, args.beta, args.gamma
+    verbose = False
+    device = X.device
+    idx_unlabeled = val_mask | test_mask
+    H = H.clone().detach()
+    X = X.clone().detach()
+    H.requires_grad = False
+    X.requires_grad = False
+    n, m = H.shape
+    delta_H = (1e-3 * torch.randn_like(H)).requires_grad_()
+    delta_X = (1e-3 * torch.randn_like(X)).requires_grad_()
+    L_orig = lap(H)
+    dv_orig = H @ torch.ones((H.shape[1],), device=device)
+    loss_meta_trajectory = []
+    acc_drop_trajectory = []
+    lap_shift_trajectory = []
+    lap_dist_trajectory = []
+    cls_loss_trajectory = []
+    deg_penalty_trajectory = []
+    feature_shift_trajectory = []
+    surrogate_test_trajectory = []
+    target_test_trajectory = []
+    for t in tqdm(range(T)):
+        runtime_start = time.time()
+        if surrogate_class is None:
+            surrogate_model = SimpleHGNN(X.shape[1], hidden_dim = args.MLP_hidden, out_dim = args.num_classes, device = X.device).to(device)
+            # optimizer = torch.optim.Adam(surrogate_model.parameters(),lr=args.lr)
+        else:
+            raise Exception("Other surrogates Not implemented")
+        
+        H_pert = torch.clamp(H + delta_H, 0, 1)
+        X_pert = X + delta_X
+        L_pert = lap(H_pert)
+        # for epoch in tqdm(range(args.num_epochs),desc = 'Training surrogate: iter = '+str(t)):
+        criterion = nn.CrossEntropyLoss()
+        best_val_accuracy = -float('inf')
+        best_model_state = None
+        # if t == T-1:
+        #     surrogate_epochs = args.epochs 
+        # else:
+        #     surrogate_epochs = args.num_epochs_sur
+        data.x = X_pert
+        data.edge_index = incidence_to_edge_index(H_pert)
+        theta = _clone_params(surrogate_model)
+        opt_state = init_adam_state(theta)
+        # Z_orig = logits_orig # Will not be gray-box anymore. Since using target models logit here.
+        # with torch.no_grad():
+        #     surrogate_model.eval()
+        #     Z_orig = functional_call(surrogate_model, theta, (X, H))
+        # Unrolled SGD steps
+        for _ in range(args.num_epochs_sur):
+            surrogate_model.train()
+            # logits = functional_call(surrogate_model, (theta, buffers), (X_pert, H_pert))
+            logits = functional_call(surrogate_model, theta, (X_pert, H_pert))
+            loss_train = F.cross_entropy(logits[train_mask], y[train_mask])
+            grads = torch.autograd.grad(
+                loss_train,
+                theta.values(),
+                create_graph=True,   # IMPORTANT: enables outer gradient through inner steps
+                retain_graph=True
+            )
+            # theta = _sgd_step(theta, grads, args.lr)
+            theta, opt_state = _adam_step(
+                theta,
+                grads,
+                opt_state,
+                lr=args.lr
+            )
+
+        # for epoch in range(surrogate_epochs):
+        #     surrogate_model.train()
+        #     optimizer.zero_grad()
+        #     logits = surrogate_model(X_pert, H_pert)
+        #     # print(logits[train_mask].shape,y[train_mask].shape,logits.shape,y.shape)
+        #     loss = criterion(logits[train_mask],y[train_mask])
+        #     loss.backward(retain_graph=True)
+        #     optimizer.step()
+        #     if t == T-1:
+        #         surrogate_model.eval()
+        #         # Save the surrogate model (which has the best validation accuracy) for robust training
+        #         with torch.no_grad():   
+        #             # val_loss = criterion(logits[val_mask], y[val_mask])
+        #             val_accuracy = accuracy(logits[val_mask],y[val_mask])
+        #         if val_accuracy.item() > best_val_accuracy:
+        #             best_val_accuracy = val_accuracy.item()
+        #             # print('Best val accuracy: ',best_val_accuracy)
+        #             best_model_state = surrogate_model.state_dict()
+
+            # if epoch%20 == 0 and verbose:
+            #     print('Epoch: ',epoch)
+            #     with torch.no_grad():
+            #         target_model.eval()
+            #         # _, _, acc_drop = classification_drop(args,target_model, H, HG, X, H_pert, X_pert, y)
+            #         logits_adv,_ = target_model(data)
+            #     acc_orig = (logits_orig.argmax(dim=1)[test_mask] == y[test_mask]).float().mean().item()
+            #     acc_adv = (logits_adv.argmax(dim=1)[test_mask] == y[test_mask]).float().mean().item()
+            #     acc_drop = (acc_orig - acc_adv)/acc_orig
+            #     _, _, acc_drop_sur = classification_drop(args,surrogate_model, H, None, X, H_pert, X_pert, y)
+            #     print("Surr Loss : ",loss.item()," Accuracy drop (surrogate): ", acc_drop_sur*100,'%', " Accuracy drop (target): ", acc_drop*100,'%')
+        time1 = time.time() - runtime_start
+        # if t == T-1:
+        #     surrogate_model.load_state_dict(best_model_state) # Take the best model
+        with torch.no_grad():
+            target_model.eval()
+            surrogate_model.eval()
+            Z_orig = functional_call(surrogate_model, theta, (X, H))
+            surrogate_test_accuracy = accuracy(
+                functional_call(
+                    surrogate_model, theta, (X_pert, H_pert))[test_mask], 
+                    y[test_mask]
+                ) 
+            target_Z,_ = target_model(data)
+            target_model_test_accuracy = accuracy(target_Z[test_mask], y[test_mask])
+            surrogate_test_trajectory.append(surrogate_test_accuracy.item())
+            target_test_trajectory.append(target_model_test_accuracy.item())
+        if t == T-1:
+            os.makedirs(os.path.join(root,str(args.seed)), exist_ok=True)
+            prefix = os.path.join(root,str(args.seed), 'SimpleHGNN_'+args.dataset+'_'+args.model+'_'+str(args.ptb_rate))
+            torch.save(best_model_state, prefix+'_weights.pth')
+        runtime_start2 = time.time()
+        # Z = surrogate_model(X_pert, H_pert) # Trained surrogate model
+        surrogate_model.train()
+        Z = functional_call(surrogate_model, theta, (X_pert, H_pert))
+        # delta_L = (L_pert - L_orig) @ Z
+        delta_L = (L_pert @ Z- L_orig @ Z_orig)
+
+        dv_temp = H_pert @ torch.ones((H.shape[1],), device=device)
+        degree_violation = (dv_temp - dv_orig)
+        degree_penalty = torch.sum(degree_violation ** 2) / n
+        deg_penalty_val = degree_penalty.item()
+
+        logits_adv = Z
+        loss_cls = F.cross_entropy(logits_adv[train_mask], y[train_mask])
+        if args.loss == 'L2':
+            lap_dist = torch.norm(delta_L, p=2)
+        else:
+            lap_dist = (delta_L**2).mean()
+         
+        cls_loss_val = loss_cls.item()
+        lap_dist_val = lap_dist.item() if isinstance(lap_dist, torch.Tensor) else lap_dist
+        loss_meta = alpha*lap_dist - beta*degree_penalty + gamma * loss_cls
+
+        grads = torch.autograd.grad(loss_meta,[delta_H,delta_X])
+
+        lap_dist_trajectory.append(lap_dist_val)
+        loss_meta_trajectory.append(loss_meta.item())
+        # _, _, acc_drop = classification_drop(args,target_model, H, HG, X, H_pert, X_pert, y)
+        with torch.no_grad():
+            target_model.eval()
+            # _, _, acc_drop = classification_drop(args,target_model, H, HG, X, H_pert, X_pert, y)
+            logits_adv,_ = target_model(data)
+        acc_orig = (logits_orig.argmax(dim=1)[test_mask] == y[test_mask]).float().mean().item()
+        acc_adv = (logits_adv.argmax(dim=1)[test_mask] == y[test_mask]).float().mean().item()
+        acc_drop = (acc_orig - acc_adv)/acc_orig
+        acc_drop_trajectory.append(acc_drop)
+        cls_loss_trajectory.append(cls_loss_val)
+        deg_penalty_trajectory.append(deg_penalty_val)
+        lap_diff = laplacian_diff(H, torch.clamp(H + delta_H, 0, 1))
+        feature_shift = torch.norm(delta_X, p=2).item()
+        lap_shift_trajectory.append(lap_diff)
+        feature_shift_trajectory.append(feature_shift)
+        with torch.no_grad():
+            # Proceed with original gradient ascent
+            delta_H += eta_H * grads[0].sign()
+            delta_X += eta_X * grads[1].sign()
+            flat = delta_H.abs().flatten()
+            topk = torch.topk(flat, k=min(delta_H.numel(), budget)).indices
+            delta_H_new = torch.zeros_like(delta_H)
+            delta_H_new.view(-1)[topk] = delta_H.view(-1)[topk]
+            delta_H.copy_(delta_H_new)
+
+        delta_X = delta_X.clamp(-epsilon, epsilon)
+        time2 = time.time() - runtime_start2
+    results = [loss_meta_trajectory, acc_drop_trajectory, lap_shift_trajectory, lap_dist_trajectory, cls_loss_trajectory, \
+               deg_penalty_trajectory,feature_shift_trajectory,surrogate_test_trajectory, target_test_trajectory]
+    print(acc_drop_trajectory)
+    M = (delta_H != 0).float()
+    # exact flip on selected entries
+    H_adv = H + (1 - 2*H) * M
+    # (optional) if H might not be perfectly binary:
+    H_adv = (H_adv > 0.5).float()
+    return H_adv.detach(), X + delta_X.detach(), results, time1+time2, best_model_state
+
+def meta_laplacian_PGD(
+    args, H, X, y,
+    train_mask,
+    budget=20, epsilon=0.05, T=20,
+    eta_H=1e-2, eta_X=None
+):
+    """
+    PGD-style MeLA attack (no meta-learning unrolling).
+
+    Stronger than FGSM by multi-step ascent on a fixed meta-loss.
+    """
+    alpha, beta, gamma = args.alpha, args.beta, args.gamma
+    device = X.device
+    if eta_X is None:
+        eta_X = epsilon / T
+
+    H = H.clone().detach()
+    X = X.clone().detach()
+
+    n, m = H.shape
+    start_time = time.time()
+    # --------------------------------------------------
+    # 1) Train surrogate ONCE (clean)
+    # --------------------------------------------------
+    surrogate = SimpleHGNN(
+        X.shape[1],
+        hidden_dim=args.MLP_hidden,
+        out_dim=args.num_classes,
+        device=device
+    ).to(device)
+
+    opt = torch.optim.Adam(surrogate.parameters(), lr=args.lr)
+    for _ in range(args.num_epochs_sur):
+        opt.zero_grad()
+        loss = F.cross_entropy(surrogate(X, H)[train_mask], y[train_mask])
+        loss.backward()
+        opt.step()
+
+    surrogate.eval()
+    with torch.no_grad():
+        Z_orig = surrogate(X, H)
+
+    L_orig = lap(H)
+    dv_orig = H @ torch.ones((m,), device=device)
+
+    # --------------------------------------------------
+    # 2) Initialize perturbations
+    # --------------------------------------------------
+    delta_H = torch.zeros_like(H, requires_grad=True)
+    delta_X = torch.zeros_like(X, requires_grad=True)
+
+    # --------------------------------------------------
+    # 3) PGD loop
+    # --------------------------------------------------
+    loss_metas = []
+    lap_dists = []
+    degree_penalties = []
+    loss_cls_list = []
+
+    for _ in range(T):
+
+        H_pert = torch.clamp(H + delta_H, 0, 1)
+        X_pert = X + delta_X
+
+        L_pert = lap(H_pert)
+        Z = surrogate(X_pert, H_pert)
+
+        # Meta-loss
+        delta_L = L_pert @ Z - L_orig @ Z_orig
+        lap_dist = (
+            torch.norm(delta_L, p=2)
+            if args.loss == "L2"
+            else (delta_L ** 2).mean()
+        )
+
+        dv_temp = H_pert @ torch.ones((m,), device=device)
+        deg_penalty = torch.sum((dv_temp - dv_orig) ** 2) / n
+        cls_loss = F.cross_entropy(Z[train_mask], y[train_mask])
+
+        loss_meta = alpha * lap_dist - beta * deg_penalty + gamma * cls_loss
+        loss_metas.append(loss_meta.item())
+        lap_dists.append(lap_dist.item())
+        degree_penalties.append(deg_penalty.item())
+        loss_cls_list.append(cls_loss.item())
+        gH, gX = torch.autograd.grad(loss_meta, [delta_H, delta_X])
+
+        with torch.no_grad():
+            # ---- H: gradient-based top-k PGD
+            flip_gain = (1 - 2 * H) * gH
+            score = flip_gain.clone()
+            score[score <= 0] = -float("inf")
+
+            flat = score.flatten()
+            topk = torch.topk(flat, k=min(budget, flat.numel())).indices
+
+            M = torch.zeros_like(flat)
+            M[topk] = 1.0
+            M = M.view_as(H)
+
+            delta_H.copy_(eta_H * gH.sign())
+            delta_H.mul_(M)
+
+            # ---- X: standard PGD
+            delta_X.add_(eta_X * gX.sign())
+            delta_X.clamp_(-epsilon, epsilon)
+
+    # --------------------------------------------------
+    # 4) Discretize
+    # --------------------------------------------------
+    with torch.no_grad():
+        M = (delta_H != 0).float()
+        H_adv = H + (1 - 2 * H) * M
+        H_adv = (H_adv > 0.5).float()
+        X_adv = X + delta_X
+    total_time = time.time() - start_time
+    with torch.no_grad():
+        # report effective budget usage
+        num_changed = (H_adv != H).sum().item()
+
+    results = {
+        "num_changed_H": int(num_changed)    
+    }
+    # print("loss trajectory: ", loss_metas)
+    # print('degree penalty trajectory: ', degree_penalties)
+    # print('laplacian distance trajectory: ', lap_dists)
+    # print('classification loss trajectory: ', loss_cls_list)
+    return H_adv, X_adv, results, total_time
 
 def get_attack(target_model,H,X,y,data,HG,train_mask,val_mask,test_mask,perturbations):
     if args.attack == 'gradargmax':
@@ -357,7 +941,7 @@ def get_attack(target_model,H,X,y,data,HG,train_mask,val_mask,test_mask,perturba
         attack_model = GradArgmax(model=target_model.to(device), nnodes=X.shape[0], nnedges = H.shape[1], \
                                 attack_structure=True, device=device)
         time1 = time.time()
-        attack_model.attack(X, H.clone(), y, n_perturbations=perturbations )
+        attack_model.attack(X, H.clone(), y, n_perturbations=perturbations, train_mask=train_mask)
         exec_time = time.time() - time1
         H_adv = attack_model.modified_H
         row_degrees = H_adv.sum(dim=1)
@@ -632,7 +1216,7 @@ if __name__ == '__main__':
     parser.add_argument('--Classifier_hidden', default=256,
                         type=int)  # Decoder hidden units
     parser.add_argument('--display_step', type=int, default=-1)
-    parser.add_argument('--alpha', type=float, default=1)
+    parser.add_argument('--hyperMLP_alpha', type=float, default=1)
     parser.add_argument('--aggregate', default='mean', choices=['sum', 'mean'])
     # ['all_one','deg_half_sym']
     parser.add_argument('--normtype', default='all_one')
@@ -649,7 +1233,7 @@ if __name__ == '__main__':
     parser.add_argument('--perturb_type', default='toxic', type=str)
     parser.add_argument('--perturb_prop', default=0.0, type=float)
     parser.add_argument('--feature_noise', default='1', type=str)
-    parser.add_argument('--sth_type', default='max_s', type=str)
+    # parser.add_argument('--sth_type', default='max_s', type=str)
     # whether the he contain self node or not
     parser.add_argument('--exclude_self', action='store_true')
     parser.add_argument('--PMA', action='store_true')
@@ -671,17 +1255,20 @@ if __name__ == '__main__':
     parser.add_argument('--UniGNN_degE', default = 0)
     parser.add_argument('--seed', type=int, default=1000, help='Random seed.')
     parser.add_argument('--attack', type=str, default='mla', \
-                    choices=['mla','Rand-flip', 'Rand-feat','gradargmax','mla_fgsm'], help='model variant')
+                    choices=['mla','Rand-flip', 'Rand-feat','gradargmax','mla_fgsm','mla_pgd','mla_unrolled'], help='model variant')
     parser.add_argument('--epsilon', type=float, default=0.05, help='Node Feature perturbation bound')
     parser.add_argument('--ptb_rate', type=float, default=0.2,  help='pertubation rate')
     parser.add_argument('--patience', type=int, default=150,
                     help='Patience for training with early stopping.')
     parser.add_argument('--T', type=int, default=80, help='Number of iterations for the attack.')
-    parser.add_argument('--mla_alpha', type=float, default=4.0, help='weight for classification loss')
+    # parser.add_argument('--mla_alpha', type=float, default=4.0, help='weight for classification loss')
     parser.add_argument('--eta_H', type=float, default=1e-2, help='Learning rate for H perturbation')
     parser.add_argument('--eta_X', type=float, default=1e-2, help='Learning rate for X perturbation')
     parser.add_argument('--num_epochs_sur', type=int, default=80, help='#epochs for the surrogate training.')
-
+    parser.add_argument('--beta', type=float, default= 1.0, help='weight for degree penalty loss component')
+    parser.add_argument('--gamma', type=float, default=4.0, help='weight for classification loss component')
+    parser.add_argument('--alpha', type=float, default=1.0, help='weight for laplacian Loss component')
+    parser.add_argument('--loss', type=str, default='L2', help='Loss to measure laplacian distance.', choices=['MSE','L2'])
     parser.set_defaults(PMA=True)  # True: Use PMA. False: Use Deepsets.
     parser.set_defaults(add_self_loop=True)
     parser.set_defaults(exclude_self=False)
@@ -696,7 +1283,8 @@ if __name__ == '__main__':
     print(args)
     # # Part 1: Load data
     root2 = './hypergraphMLP_Melad'
-    root='./hypergraphMLP'
+    # root='./hypergraphMLP'
+    root='./base_newsplit' 
     # root='./'+args.attack+'_hypergraphMLP_final2'
     os.makedirs(root, exist_ok=True)
     save = True
@@ -743,7 +1331,7 @@ if __name__ == '__main__':
             data.num_hyperedges = torch.tensor(
                 [data.edge_index[0].max()-data.n_x[0]+1])
     data = ExtractV2E(data)
-    setup_seed(args.seed)
+    # setup_seed(args.seed)
     if((args.perturb_type == 'toxic') and (args.perturb_prop > 0)):
         data = perturb_hyperedges(data, args.perturb_prop)
     if args.dname == 'cora':
@@ -763,8 +1351,9 @@ if __name__ == '__main__':
     # else:
     #     raise ValueError('dataset not supported')
     args.__setattr__('dataset',dataset)
+    setup_seed(33) 
     if dataset not in ['cora','citeseer','coauthor_cora']:
-        split_idx = rand_train_test_idx(data.y)
+        split_idx = rand_train_test_idx(data.y,train_prop=args.train_prop, valid_prop=args.valid_prop)
         train_mask, val_mask, test_mask = split_idx['train'], split_idx['valid'], split_idx['test']
     else:
         _, _, _, train_mask, val_mask, test_mask = get_dataset(args, device='cpu')
@@ -808,10 +1397,10 @@ if __name__ == '__main__':
     smooth_loss_tensor = torch.zeros((args.runs, args.epochs))
     assert args.runs == 1, "Only one run is supported for now"
     for run in range(args.runs):
-        setup_seed(args.seed)
         # split_idx = split_idx_lst[run]
         split_idx = {'train': train_mask, 'valid': val_mask, 'test': test_mask}
         train_idx = split_idx['train'].to(device)
+        setup_seed(args.seed)
         model.reset_parameters()
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
     #     This is for HNHN only
@@ -830,8 +1419,8 @@ if __name__ == '__main__':
             out, x = model(data)
             out = F.log_softmax(out, dim=1)
             loss_sth = 0
-            if(args.alpha > 0):
-                loss_sth = smooth_loss(x, n_idxs, e_idxs, edge_index, epoch) * args.alpha
+            if(args.hyperMLP_alpha > 0):
+                loss_sth = smooth_loss(x, n_idxs, e_idxs, edge_index, epoch) * args.hyperMLP_alpha
             loss_cls = criterion(out[train_idx], data.y[train_idx])
             loss = loss_cls + loss_sth
             loss.backward(retain_graph=True)
@@ -846,7 +1435,7 @@ if __name__ == '__main__':
             val_acc_tensor[run, epoch] = result[1]
             test_acc_tensor[run, epoch] = result[2]
             smooth_loss_tensor[run, epoch] = loss_sth
-            if(args.alpha > 0):
+            if(args.hyperMLP_alpha > 0):
                 smooth_loss_tensor[run, epoch] = loss_sth.cpu()
             if valid_loss.item() < best_val_loss:
                 best_val_loss = valid_loss.item()
@@ -891,7 +1480,7 @@ if __name__ == '__main__':
     # filename = f'{res_root}/{args.dname}_noise_{args.feature_noise}.csv'
     # print(f"Saving results to {filename}")
     # with open(filename, 'a+') as write_obj:
-    #     cur_line = f'{args.method}_{args.lr}_{args.wd}_{args.alpha}\n'
+    #     cur_line = f'{args.method}_{args.lr}_{args.wd}_{args.hyperMLP_alpha}\n'
     #     cur_line += f'{args.perturb_type}_{args.perturb_prop}\n'
     #     cur_line += f',{best_val.mean():.3f} ± {best_val.std():.3f}\n'
     #     cur_line += f',{best_test.mean():.3f} ± {best_test.std():.3f}\n'
@@ -907,7 +1496,7 @@ if __name__ == '__main__':
     # res_root_2 = './storage'
     # if not osp.isdir(res_root_2):
     #     os.makedirs(res_root_2)
-    # filename = f'{res_root_2}/{args.dname}_{args.feature_noise}_noise_{args.alpha}_alpha.pickle'
+    # filename = f'{res_root_2}/{args.dname}_{args.feature_noise}_noise_{args.hyperMLP_alpha}_alpha.pickle'
     # res_data = {
     #     'train_acc_tensor': train_acc_tensor,
     #     'val_acc_tensor': val_acc_tensor,
@@ -922,7 +1511,7 @@ if __name__ == '__main__':
     H = torch.Tensor(ConstructH(data)).to(device)
     X = data.x.to(device)
     n = data.n_x 
-    e = data.num_hyperedges
+    e = data.edge_index.shape[1] # data.num_hyperedges
     if type(e) == np.int32:
         e = int(e)
     if type(n) == np.int32:
@@ -933,30 +1522,48 @@ if __name__ == '__main__':
     perturbations = int(args.ptb_rate * e)
     args.__setattr__('model', args.method)
     if args.attack == 'mla':
-        H_adv, X_adv, results, exec_time, robust_model_states = meta_laplacian_pois_attack(root, H, X, y, data, None, None, model, \
+        H_adv, X_adv, results, exec_time, robust_model_states = meta_laplacian_pois_attack(args,root, H, X, y, data, None, None, model, \
                         train_mask, val_mask, test_mask, Z_orig, budget=perturbations, epsilon=args.epsilon, T=args.T, \
-                        eta_H=args.eta_H, eta_X=args.eta_X, alpha=args.mla_alpha, \
+                        eta_H=args.eta_H, eta_X=args.eta_X, \
+                        reinit_if_stuck=True)
+        save_npz(root, args.seed, results)
+        H_adv = H_adv.detach()
+        X_adv = X_adv.detach()
+        X_adv.requires_grad = False
+    elif args.attack == 'mla_unrolled':
+        H_adv, X_adv, results, exec_time, robust_model_states = meta_laplacian_pois_attack_unrolled(args,root, H, X, y, data, None, None, model, \
+                        train_mask, val_mask, test_mask, Z_orig, budget=perturbations, epsilon=args.epsilon, T=args.T, \
+                        eta_H=args.eta_H, eta_X=args.eta_X, \
                         reinit_if_stuck=True)
         save_npz(root, args.seed, results)
         H_adv = H_adv.detach()
         X_adv = X_adv.detach()
         X_adv.requires_grad = False
 
+    elif args.attack == 'mla_pgd':
+        H_adv, X_adv, results, exec_time = meta_laplacian_PGD(args, H, X, y, train_mask, \
+                                          budget = perturbations, epsilon=args.epsilon, T=args.T, \
+                                            eta_H=args.eta_H, eta_X=None)
+        H_adv = H_adv.detach()
+        X_adv = X_adv.detach()
+        X_adv.requires_grad = False
+
     elif args.attack == 'mla_fgsm':
-        H_adv, X_adv, results, exec_time, robust_model_states = meta_laplacian_FGSM(H, X, y, data, None, None, model, \
+        H_adv, X_adv, results, exec_time, robust_model_states = meta_laplacian_FGSM(args, H, X, y, data, None, None, model, \
                         train_mask, val_mask, test_mask, Z_orig, budget=perturbations, epsilon=args.epsilon, T=args.T, \
-                        eta_H=args.eta_H, eta_X=args.eta_X, alpha=args.mla_alpha, \
+                        eta_H=args.eta_H, eta_X=args.eta_X,  \
                         reinit_if_stuck=True)
 
     else:
         H_adv, X_adv, exec_time = get_attack(model, H, X, y,data, None, train_mask,val_mask,test_mask,perturbations = perturbations)
     data.x = X_adv
+    # print("H_adv: ",H_adv)
     data.edge_index = incidence_to_edge_index(H_adv)
     
     os.system('mkdir -p '+root2)
-    np.savez(os.path.join(root2, args.model+"_"+args.attack+"_"+args.dataset+"_"+str(args.seed)+ '_H_adv.npz'), H_adv.clone().cpu().numpy())
-    np.savez(os.path.join(root2, args.model+"_"+args.attack+"_"+args.dataset+"_"+str(args.seed)+ '_X_adv.npz'), X_adv.clone().cpu().numpy())
-    torch.save(data,os.path.join(root2,args.model+"_"+args.attack+"_"+args.dataset+"_"+str(args.seed)+ "_data.pth"))
+    # np.savez(os.path.join(root2, args.model+"_"+args.attack+"_"+args.dataset+"_"+str(args.seed)+ '_H_adv.npz'), H_adv.clone().cpu().numpy())
+    # np.savez(os.path.join(root2, args.model+"_"+args.attack+"_"+args.dataset+"_"+str(args.seed)+ '_X_adv.npz'), X_adv.clone().cpu().numpy())
+    # torch.save(data,os.path.join(root2,args.model+"_"+args.attack+"_"+args.dataset+"_"+str(args.seed)+ "_data.pth"))
     # import sys 
     # sys.exit(1)
     # print('H_adv:', H_adv)
@@ -968,8 +1575,9 @@ if __name__ == '__main__':
     evasion_dict['exec_time'] = exec_time
     evasion_dict['num_edges'] = e
     evasion_dict['num_vertices'] = n
-    evasion_dict['num_edges_perturbed'] = perturbations
-
+    evasion_dict['num_to_perturb'] = perturbations
+    evasion_dict['edges_changed'] = ((H_adv != H).any(dim=0)).sum().item()
+    evasion_dict['nodes_changed'] = ((H_adv != H).any(dim=1)).sum().item()
     print(json.dumps(evasion_dict,indent = 4))
     # # print('H_adv - H:',torch.sum((H_adv-H).abs()))
 
@@ -986,7 +1594,7 @@ if __name__ == '__main__':
     val_acc_tensor = torch.zeros((args.runs, args.epochs))
     test_acc_tensor = torch.zeros((args.runs, args.epochs))
     smooth_loss_tensor = torch.zeros((args.runs, args.epochs))
-    for run in tqdm(range(args.runs)):
+    for run in range(args.runs):
         setup_seed(args.seed)
         # split_idx = split_idx_lst[run]
         split_idx = {'train': train_mask, 'valid': val_mask, 'test': test_mask}
@@ -1002,18 +1610,18 @@ if __name__ == '__main__':
         patience_counter = 0
         best_model_state = None
         Z_adv = None 
-        for epoch in range(args.epochs):
+        for epoch in tqdm(range(args.epochs)):
             #         Training part
             model.train()
             optimizer.zero_grad()
             out, x = model(data)
             out = F.log_softmax(out, dim=1)
             loss_sth = 0
-            if(args.alpha > 0):
-                loss_sth = smooth_loss(x, n_idxs, e_idxs, edge_index, epoch) * args.alpha
+            if(args.hyperMLP_alpha > 0):
+                loss_sth = smooth_loss(x, n_idxs, e_idxs, edge_index, epoch) * args.hyperMLP_alpha
             loss_cls = criterion(out[train_idx], data.y[train_idx])
             loss = loss_cls + loss_sth
-            loss.backward(retain_graph=True)
+            loss.backward()
             optimizer.step()
     #         if args.method == 'HNHN':
     #             scheduler.step()
@@ -1025,7 +1633,7 @@ if __name__ == '__main__':
             val_acc_tensor[run, epoch] = result[1]
             test_acc_tensor[run, epoch] = result[2]
             smooth_loss_tensor[run, epoch] = loss_sth
-            if(args.alpha > 0):
+            if(args.hyperMLP_alpha > 0):
                 smooth_loss_tensor[run, epoch] = loss_sth.cpu()
             if valid_loss.item() < best_val_loss:
                 best_val_loss = valid_loss.item()
@@ -1059,7 +1667,10 @@ if __name__ == '__main__':
     results['exec_time'] = exec_time
     results['num_edges'] = e
     results['num_vertices'] = n
-    results['num_edges_perturbed'] = perturbations
+    results['num_to_perturb'] = perturbations
+    # results['num_edges_perturbed'] = (H_adv - H).abs().sum().item()
+    results['edges_changed'] = ((H_adv != H).any(dim=0)).sum().item()
+    results['nodes_changed'] = ((H_adv != H).any(dim=1)).sum().item()
     print('================ Poisoning setting =================')
     verbose = False
     if verbose:
@@ -1083,7 +1694,11 @@ if __name__ == '__main__':
     if save:
         results.update(vars(args))
         evasion_dict.update(vars(args))
-        
-        save_to_csv(evasion_dict,filename=os.path.join(root,'evasion_results.csv'))
-        save_to_csv(results,filename=os.path.join(root,'pois_results.csv'))
+        del results['hyperMLP_alpha']
+        del evasion_dict['hyperMLP_alpha']
+        # save_to_csv(evasion_dict,filename=os.path.join(root,'evasion_results_ICML.csv'))
+        # save_to_csv(results,filename=os.path.join(root,'pois_results.csv'))
+        # save_to_csv(results,filename=os.path.join(root,'pois_results_ICML2.csv'))
+        save_to_csv(results,filename=os.path.join(root,'pois_results_ICML_delXdelHabl.csv'))
+        save_to_csv(evasion_dict,filename=os.path.join(root,'evasion_results_ICML_delXdelHabl.csv'))
     

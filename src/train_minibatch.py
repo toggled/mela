@@ -30,7 +30,6 @@ import sys
 sys.path.append('../../')
 from mla_utils import *
 from modelzoo import SimpleHGNN
-from deeprobust.hypergraph.global_attack import GradArgmax
 import pandas as pd
 from scipy.stats import friedmanchisquare
 from torch.utils.data import DataLoader, TensorDataset
@@ -143,7 +142,7 @@ def meta_laplacian_FGSM(H, X, y, data, HG, surrogate_class, target_model, train_
         deg_penalty_val = degree_penalty.item()
         cls_loss_val = loss_cls.item()
         lap_dist_val = lap_dist.item() if isinstance(lap_dist, torch.Tensor) else lap_dist
-        loss_meta = lap_dist + degree_penalty + alpha * loss_cls
+        loss_meta = lap_dist - degree_penalty + alpha * loss_cls
 
         grads = torch.autograd.grad(loss_meta,[delta_H,delta_X])
 
@@ -493,6 +492,459 @@ def meta_laplacian_FGSM(H, X, y, data, HG, surrogate_class, target_model, train_
 
 #     return local_H
 
+def flip_sparse_incidence(H: torch.Tensor, flip_idx: torch.Tensor) -> torch.Tensor:
+    """
+    H: sparse COO [n, m], values assumed 1s, coalesced
+    flip_idx: LongTensor [k, 2] with (row, col) pairs to toggle
+    returns: sparse COO H_adv with those entries flipped
+    """
+    assert H.is_sparse, "H must be a sparse COO tensor"
+    H = H.coalesce()
+    device = H.device
+    n, m = H.shape
+
+    if flip_idx.numel() == 0:
+        return H
+
+    flip_idx = flip_idx.to(device=device, dtype=torch.long)
+
+    # Linearize indices for fast membership tests
+    H_idx = H.indices()                      # [2, nnz]
+    H_lin = H_idx[0] * m + H_idx[1]         # [nnz]
+    flip_lin = flip_idx[:, 0] * m + flip_idx[:, 1]  # [k]
+
+    # torch.isin is available in newer torch; if not, see fallback below.
+    in_H = torch.isin(flip_lin, H_lin)      # [k] True if currently 1 -> should remove
+
+    # 1) Remove: keep entries not in remove set
+    remove_lin = flip_lin[in_H]
+    if remove_lin.numel() > 0:
+        keep_mask = ~torch.isin(H_lin, remove_lin)
+        kept_idx = H_idx[:, keep_mask]
+    else:
+        kept_idx = H_idx
+
+    # 2) Add: entries not in H
+    add_idx = flip_idx[~in_H]               # [k_add, 2]
+    if add_idx.numel() > 0:
+        new_idx = torch.cat([kept_idx, add_idx.t()], dim=1)
+    else:
+        new_idx = kept_idx
+
+    # Rebuild sparse tensor (all ones)
+    values = torch.ones(new_idx.size(1), device=device, dtype=H.dtype)
+    H_adv = torch.sparse_coo_tensor(new_idx, values, size=(n, m), device=device).coalesce()
+    return H_adv
+
+def meta_laplacian_PGD(
+    args, data, split_idx,
+    train_mask,
+    budget=20, epsilon=0.05, T=20,
+    eta_H=1e-2, eta_X=None
+):
+    """
+    PGD-style MeLA attack (no meta-learning unrolling).
+
+    Stronger than FGSM by multi-step ascent on a fixed meta-loss.
+    """
+    batch_size=args.batch_size
+    alpha, beta, gamma = args.alpha, args.beta, args.gamma
+    device = data.x.device
+    data = data.to(device)
+    
+    if eta_X is None:
+        eta_X = epsilon / T
+
+    # Construct full incidence matrix (sparse)
+    full_num_nodes = data.x.size(0)
+    full_num_hyperedges = data.num_hyperedges
+    full_indices = data.edge_index
+    full_values = torch.ones(full_indices.size(1), device=device)
+    H = torch.sparse_coo_tensor(
+        full_indices, full_values, size=(full_num_nodes, full_num_hyperedges), device=device
+    ).coalesce()
+    global_delta_H = torch.zeros(H.shape).to(device)
+    global_delta_X = torch.zeros_like(data.x).to(device)
+
+    data_loader = DataLoader(TensorDataset(data.node_idx, data.x, data.y), batch_size=batch_size, shuffle=True)
+    # -------------------------------------------------
+    # 1) Train surrogate ONCE (clean)
+    # --------------------------------------------------
+    surrogate = SimpleHGNN(
+        data.x.shape[1],
+        hidden_dim=args.MLP_hidden,
+        out_dim=args.num_classes,
+        device=device
+    ).to(device)
+
+    opt = torch.optim.Adam(surrogate.parameters(), lr=args.lr)
+    for batch in data_loader:
+        batch_data, local_H = create_minibatch_for_hcha(data, batch, split_idx,construct_H=True)  # Create mini-batch for this batch
+        batch_data = batch_data.to(device)
+        for _ in range(args.num_epochs_sur):
+            opt.zero_grad()
+            loss = F.cross_entropy(surrogate(batch_data.x, local_H)[batch_data.train_mask], batch_data.y[batch_data.train_mask])
+            loss.backward()
+            opt.step()
+
+    surrogate.eval()
+    # with torch.no_grad():
+    #     Z_orig = surrogate(X, H)
+
+    # L_orig = lap(H)
+    # dv_orig = H @ torch.ones((m,), device=device)
+
+    # # --------------------------------------------------
+    # # 2) Initialize perturbations
+    # # --------------------------------------------------
+    # delta_H = torch.zeros_like(H, requires_grad=True)
+    # delta_X = torch.zeros_like(X, requires_grad=True)
+
+    # --------------------------------------------------
+    # 3) PGD loop
+    # --------------------------------------------------
+    # loss_metas = []
+    # lap_dists = []
+    # degree_penalties = []
+    # loss_cls_list = []
+
+    for t in tqdm(range(T)):
+        for batch in data_loader:
+            batch_data, local_H = create_minibatch_for_hcha(data, batch, split_idx,construct_H=True)  # Create mini-batch for this batch
+            batch_data = batch_data.to(device)  # Move to the appropriate device
+
+            # Construct the local incidence matrix for this batch
+            # local_H = create_local_H(batch_data)
+            L_orig = lap(local_H)
+            dv_orig = local_H @ torch.ones((local_H.shape[1],), device=device)
+            local_X = batch_data.x
+            if t == 0:
+                delta_X = torch.zeros_like(local_X, requires_grad=True)
+                delta_H = torch.zeros_like(local_H, requires_grad=True)
+            else:
+                delta_X = global_delta_X.index_select(0, batch_data.node_idx_orig)
+                delta_H = global_delta_H[batch_data.node_idx_orig,:][:,batch_data.involved_hyperedges-batch_data.involved_hyperedges.min()]
+
+            H_pert = torch.clamp(local_H + delta_H, 0, 1)
+            X_pert = local_X + delta_X
+        
+            with torch.no_grad():
+                Z_orig = surrogate(local_X, local_H)
+            L_pert = lap(H_pert)
+            Z = surrogate(X_pert, H_pert)
+
+            # Meta-loss
+            delta_L = L_pert @ Z - L_orig @ Z_orig
+            lap_dist = (
+                torch.norm(delta_L, p=2)
+                if args.loss == "L2"
+                else (delta_L ** 2).mean()
+            )
+
+            dv_temp = H_pert @ torch.ones((local_H.shape[1],), device=device)
+            deg_penalty = torch.mean((dv_temp - dv_orig) ** 2)
+            cls_loss = F.cross_entropy(Z[batch_data.train_mask], batch_data.y[batch_data.train_mask])
+
+            loss_meta = alpha * lap_dist - beta * deg_penalty + gamma * cls_loss
+            # loss_metas.append(loss_meta.item())
+            # lap_dists.append(lap_dist.item())
+            # degree_penalties.append(deg_penalty.item())
+            # loss_cls_list.append(cls_loss.item())
+            gH, gX = torch.autograd.grad(loss_meta, [delta_H, delta_X])
+
+            with torch.no_grad():
+                # ---- H: gradient-based top-k PGD
+                flip_gain = (1 - 2 * local_H) * gH
+                score = flip_gain.clone()
+                score[score <= 0] = -float("inf")
+
+                flat = score.flatten()
+                topk = torch.topk(flat, k=min(budget//(4*len(data_loader)), flat.numel())).indices
+                # topk = torch.topk(flat, k=min(budget*(local_H.shape[0]*local_H.shape[1])//(H.shape[0]*H.shape[1]), flat.numel())).indices
+
+                M = torch.zeros_like(flat)
+                M[topk] = 1.0
+                M = M.view_as(local_H)
+
+                delta_H.copy_(eta_H * gH.sign())
+                delta_H.mul_(M)
+
+                # ---- X: standard PGD
+                delta_X.add_(eta_X * gX.sign())
+                delta_X.clamp_(-epsilon, epsilon)
+            global_delta_X.index_copy_(0, batch_data.node_idx_orig, delta_X)
+            row_indices = batch_data.node_idx_orig.flatten()
+            col_indices = batch_data.involved_hyperedges-batch_data.involved_hyperedges.min()
+            R, C = len(row_indices), len(col_indices)
+            rows = row_indices.unsqueeze(1).expand(-1, C)      # shape [R, C]
+            cols = col_indices.unsqueeze(0).expand(R, -1)      # shape [R, C]
+            global_delta_H[rows,cols] = delta_H 
+
+ 
+    # ------------------------------------------------- -
+    # 4) Discretize
+    # --------------------------------------------------
+    with torch.no_grad():
+        flip_idx = (global_delta_H != 0).nonzero(as_tuple=False)  # [k, 2]
+        H_adv = flip_sparse_incidence(H, flip_idx)
+        X_adv = data.x + global_delta_X #.clamp(-epsilon, epsilon)
+    results = {}
+    with torch.no_grad():
+        # report effective budget usage
+        num_changed, edges_changed, nodes_changed = sparse_change_stats(H, H_adv)
+        print('#changed:', num_changed, 'budget:', budget)
+        print('edges_changed:', edges_changed)
+        print('nodes_changed:', nodes_changed)
+        results['h_l0'] = int(num_changed)
+        results['edges_changed'] = int(edges_changed)
+        results['nodes_changed'] = int(nodes_changed)
+        results['x_inf'] = torch.norm((data.x - X_adv), p=float('inf')).item()
+
+    # results = {
+    #     "num_changed_H": int(num_changed)    
+    # }
+    # print("loss trajectory: ", loss_metas)
+    # print('degree penalty trajectory: ', degree_penalties)
+    # print('laplacian distance trajectory: ', lap_dists)
+    # print('classification loss trajectory: ', loss_cls_list)
+    return H_adv, X_adv,results 
+
+# def meta_laplacian_PGD(
+#     args, data, split_idx, train_mask,
+#     budget=20, epsilon=0.05, T=20,
+#     eta_H=1e-2, eta_X=None,
+#     cand_per_batch_cap=2048,
+# ):
+#     """
+#     MeLA-PGD (minibatch-safe, sparse-global-H).
+
+#     Key properties:
+#       - H is maintained as sparse COO globally (H_cur).
+#       - For each minibatch, local_H is dense (from create_minibatch_for_hcha(..., construct_H=True)).
+#       - Feature perturbation is global dense delta_X (node-feature sized), updated by overwrite.
+#       - Structure update uses global top-k flips per outer PGD step (budget).
+#       - No singleton / small-hyperedge constraints (removed entirely).
+#     """
+#     device = data.x.device
+#     data = data.to(device)
+
+#     batch_size = args.batch_size
+#     alpha, beta, gamma = args.alpha, args.beta, args.gamma
+
+#     if eta_X is None:
+#         eta_X = epsilon / max(1, T)
+
+#     # -----------------------------
+#     # Build initial sparse incidence H from data.edge_index
+#     # Assumes data.edge_index entries are (node_id, hyperedge_id) in [0, num_hyperedges-1]
+#     # -----------------------------
+#     full_num_nodes = int(data.x.size(0))
+#     full_num_hyperedges = int(data.num_hyperedges)
+
+#     full_indices = data.edge_index.to(device)
+#     full_values = torch.ones(full_indices.size(1), device=device, dtype=torch.float32)
+
+#     H_init = torch.sparse_coo_tensor(
+#         full_indices, full_values,
+#         size=(full_num_nodes, full_num_hyperedges),
+#         device=device
+#     ).coalesce()
+
+#     H_cur = H_init
+#     global_delta_X = torch.zeros_like(data.x, device=device)
+
+#     # -----------------------------
+#     # Data loader
+#     # -----------------------------
+#     if not hasattr(data, "node_idx"):
+#         data.node_idx = torch.arange(full_num_nodes, device=device)
+
+#     data_loader = DataLoader(
+#         TensorDataset(data.node_idx, data.x, data.y),
+#         batch_size=batch_size,
+#         shuffle=True
+#     )
+
+#     # -----------------------------
+#     # Train surrogate ONCE on clean minibatches
+#     # -----------------------------
+#     surrogate = SimpleHGNN(
+#         data.x.shape[1],
+#         hidden_dim=args.MLP_hidden,
+#         out_dim=args.num_classes,
+#         device=device
+#     ).to(device)
+
+#     opt = torch.optim.Adam(surrogate.parameters(), lr=args.lr)
+#     surrogate.train()
+#     for batch in data_loader:
+#         batch_data, local_H = create_minibatch_for_hcha(
+#             data, batch, split_idx, construct_H=True
+#         )
+#         batch_data = batch_data.to(device)
+#         local_H = local_H.to(device)
+#         for _ in range(args.num_epochs_sur):
+#             opt.zero_grad()
+#             logits = surrogate(batch_data.x, local_H)
+#             loss = F.cross_entropy(
+#                 logits[batch_data.train_mask],
+#                 batch_data.y[batch_data.train_mask]
+#             )
+#             loss.backward()
+#             opt.step()
+#     surrogate.eval()
+
+#     # -----------------------------
+#     # PGD outer loop
+#     # -----------------------------
+#     for t in tqdm(range(T), desc="MeLA-PGD (simplified)"):
+#         # make minibatch builder see current structure
+#         with torch.no_grad():
+#             data.edge_index = H_cur.coalesce().indices()
+
+#         cand_rows, cand_cols, cand_scores = [], [], []
+
+#         for batch in data_loader:
+#             batch_data, local_H = create_minibatch_for_hcha(
+#                 data, batch, split_idx, construct_H=True
+#             )
+#             batch_data = batch_data.to(device)
+#             local_H = local_H.to(device)
+
+#             node_ids = batch_data.node_idx_orig.to(device)          # [B] global node ids
+#             he_ids = batch_data.involved_hyperedges.to(device)      # [E_local] global hyperedge ids
+
+#             # Leaf feature perturbation for this batch
+#             delta_X_local = (
+#                 global_delta_X.index_select(0, node_ids)
+#                 .detach().clone().requires_grad_(True)
+#             )
+
+#             # Leaf relaxed H variable for this batch
+#             H_relax = local_H.detach().clone().requires_grad_(True)
+
+#             X_pert = batch_data.x + delta_X_local
+#             H_pert = torch.clamp(H_relax, 0.0, 1.0)
+
+#             with torch.no_grad():
+#                 Z_orig = surrogate(batch_data.x, local_H)
+#                 L_orig = lap(local_H)
+#                 dv_orig = local_H @ torch.ones((local_H.shape[1],), device=device)
+
+#             L_pert = lap(H_pert)
+#             Z = surrogate(X_pert, H_pert)
+
+#             delta_L = L_pert @ Z - L_orig @ Z_orig
+#             lap_dist = (
+#                 torch.norm(delta_L, p=2)
+#                 if args.loss == "L2"
+#                 else (delta_L ** 2).mean()
+#             )
+
+#             dv_temp = H_pert @ torch.ones((local_H.shape[1],), device=device)
+#             deg_penalty = torch.mean((dv_temp - dv_orig) ** 2)
+
+#             cls_loss = F.cross_entropy(
+#                 Z[batch_data.train_mask],
+#                 batch_data.y[batch_data.train_mask]
+#             )
+
+#             loss_meta = alpha * lap_dist - beta * deg_penalty + gamma * cls_loss
+
+#             gH, gX = torch.autograd.grad(loss_meta, [H_relax, delta_X_local])
+
+#             # ---- Feature PGD update: overwrite global entries (no accumulation)
+#             with torch.no_grad():
+#                 delta_X_upd = delta_X_local + eta_X * gX.sign()
+#                 delta_X_upd.clamp_(-epsilon, epsilon)
+#                 global_delta_X[node_ids] = delta_X_upd.detach()
+
+#             # ---- Structure candidate collection (no singleton mask)
+#             local_H_bin = (local_H > 0.5).float()
+#             flip_gain = (1.0 - 2.0 * local_H_bin) * gH
+#             score = flip_gain.detach()
+#             score[score <= 0] = -float("inf")  # only beneficial flips
+
+#             flat = score.flatten()
+#             if torch.isfinite(flat).any():
+#                 k_local = min(int(cand_per_batch_cap), flat.numel())
+#                 top_idx = torch.topk(flat, k=k_local).indices
+
+#                 valid = torch.isfinite(flat[top_idx])
+#                 if valid.any():
+#                     top_idx = top_idx[valid]
+
+#                     mloc = score.shape[1]
+#                     u_loc = top_idx // mloc
+#                     e_loc = top_idx % mloc
+
+#                     u_glob = node_ids[u_loc]
+#                     e_glob = he_ids[e_loc]
+#                     sc = flat[top_idx]
+
+#                     cand_rows.append(u_glob)
+#                     cand_cols.append(e_glob)
+#                     cand_scores.append(sc)
+
+#         # ---- GLOBAL top-k over all collected candidates
+#         with torch.no_grad():
+#             if len(cand_scores) == 0:
+#                 continue
+
+#             rows = torch.cat(cand_rows, dim=0)
+#             cols = torch.cat(cand_cols, dim=0)
+#             scores = torch.cat(cand_scores, dim=0)
+
+#             # Deduplicate by (row,col) and keep max score per pair (version-safe)
+#             m = H_cur.shape[1]
+#             lin = rows * m + cols
+
+#             order = torch.argsort(lin)
+#             lin_s = lin[order]
+#             rows_s = rows[order]
+#             cols_s = cols[order]
+#             scores_s = scores[order]
+
+#             uniq_lin, counts = torch.unique_consecutive(lin_s, return_counts=True)
+#             starts = torch.cat([torch.tensor([0], device=device), counts.cumsum(0)[:-1]])
+#             ends = counts.cumsum(0)
+
+#             max_rows, max_cols, max_scores = [], [], []
+#             for a, b in zip(starts.tolist(), ends.tolist()):
+#                 seg = scores_s[a:b]
+#                 j = int(torch.argmax(seg).item())
+#                 max_rows.append(rows_s[a + j])
+#                 max_cols.append(cols_s[a + j])
+#                 max_scores.append(seg[j])
+
+#             max_rows = torch.stack(max_rows)
+#             max_cols = torch.stack(max_cols)
+#             max_scores = torch.stack(max_scores)
+
+#             k = min(int(budget), int(max_scores.numel()))
+#             if k <= 0:
+#                 continue
+
+#             top = torch.topk(max_scores, k=k).indices
+#             flip_idx = torch.stack([max_rows[top], max_cols[top]], dim=1)  # [k,2]
+
+#             H_cur = flip_sparse_incidence(H_cur, flip_idx)
+
+#     # -----------------------------
+#     # Output
+#     # -----------------------------
+#     with torch.no_grad():
+#         H_adv = H_cur.coalesce()
+#         X_adv = data.x + global_delta_X
+
+#         results = {}
+#         num_changed, edges_changed, nodes_changed = sparse_change_stats(H_init, H_adv)
+#         results["h_l0"] = int(num_changed)
+#         results["edges_changed"] = int(edges_changed)
+#         results["nodes_changed"] = int(nodes_changed)
+
+#     return H_adv, X_adv, results
+
 def meta_laplacian_pois_attack(root, data, surrogate_class, target_model, split_idx, logits_orig, budget=20, epsilon=0.05, T=20, eta_H=1e-2, eta_X=1e-2, alpha=4.0):
     """
     Meta Laplacian Attack adapted to poisoning setting (training-time) with mini-batch support.
@@ -648,7 +1100,7 @@ def meta_laplacian_pois_attack(root, data, surrogate_class, target_model, split_
             loss_cls = F.cross_entropy(Z, batch_data.y)
             
             # Compute total Meta-Loss
-            loss_meta = lap_dist + degree_penalty + alpha * loss_cls
+            loss_meta = lap_dist - degree_penalty + alpha * loss_cls
 
 
             # Update the perturbations (delta_H and delta_X)
@@ -713,11 +1165,12 @@ def meta_laplacian_pois_attack(root, data, surrogate_class, target_model, split_
 
 def get_attack(target_model,H,X,y,data,HG,train_mask,val_mask,test_mask,perturbations):
     if args.attack == 'gradargmax':
+        raise ValueError("gradargmax not implemented in this version")
         if args.method != 'simplehgnn':
             target_model = SimpleHGNN(X.shape[1],hidden_dim = args.MLP_hidden, out_dim = args.num_classes,device = X.device)
         # print('surrogate : ',target_model)
-        attack_model = GradArgmax(model=target_model.to(device), nnodes=X.shape[0], nnedges = H.shape[1], \
-                                attack_structure=True, device=device)
+        # attack_model = GradArgmax(model=target_model.to(device), nnodes=X.shape[0], nnedges = H.shape[1], \
+        #                         attack_structure=True, device=device)
         time1 = time.time()
         attack_model.attack(X, H.clone(), y, n_perturbations=perturbations )
         exec_time = time.time() - time1
@@ -1274,6 +1727,40 @@ def create_minibatch_for_hcha(data, batch_data, split_idx, add_self_loops=True, 
 #     accuracy = correct / len(all_labels) * 100
 
 #     return accuracy, all_preds
+def sparse_change_stats(H: torch.Tensor, H_adv: torch.Tensor):
+    """
+    Assumes binary incidence stored as sparse COO with values 1.
+    Returns: (num_changed_entries, num_changed_edges, num_changed_nodes)
+    """
+    assert H.is_sparse and H_adv.is_sparse
+    H = H.coalesce()
+    H_adv = H_adv.coalesce()
+    device = H.device
+    assert H_adv.device == device
+    n, m = H.shape
+
+    # Linearize indices to compare supports
+    idx1 = H.indices()        # [2, nnz1]
+    idx2 = H_adv.indices()    # [2, nnz2]
+    lin1 = idx1[0] * m + idx1[1]
+    lin2 = idx2[0] * m + idx2[1]
+
+    # Symmetric difference of supports
+    in2 = torch.isin(lin1, lin2)
+    in1 = torch.isin(lin2, lin1)
+
+    removed = idx1[:, ~in2]   # entries that were 1 and became 0
+    added   = idx2[:, ~in1]   # entries that were 0 and became 1
+
+    diff_idx = torch.cat([removed, added], dim=1)  # [2, K]
+    num_changed = diff_idx.size(1)
+
+    if num_changed == 0:
+        return 0, 0, 0
+
+    nodes_changed = torch.unique(diff_idx[0]).numel()
+    edges_changed = torch.unique(diff_idx[1]).numel()
+    return num_changed, edges_changed, nodes_changed
 
 def sparse_H_to_edge_index(H: torch.Tensor) -> torch.Tensor:
     """
@@ -1456,7 +1943,12 @@ if __name__ == '__main__':
     parser.add_argument('--eta_H', type=float, default=1e-2, help='Learning rate for H perturbation')
     parser.add_argument('--eta_X', type=float, default=1e-2, help='Learning rate for X perturbation')
     parser.add_argument('--num_epochs_sur', type=int, default=80, help='#epochs for the surrogate training.')
-    parser.add_argument('--batch_size', type=int, default=1024, help='Size of Minibatch.')
+    parser.add_argument('--batch_size', type=int, default=512, help='Size of Minibatch.')
+    parser.add_argument('--beta', type=float, default= 1.0, help='weight for degree penalty loss component')
+    parser.add_argument('--gamma', type=float, default=4.0, help='weight for classification loss component')
+    parser.add_argument('--alpha', type=float, default=4, help='weight for laplacian Loss component')
+    parser.add_argument('--loss', type=str, default='L2', help='Loss to measure laplacian distance.', choices=['MSE','L2'])
+
     # parser.add_argument('--delxdelh',default='Both',choices=['Both','delx','delh'])
     parser.set_defaults(PMA=True)  # True: Use PMA. False: Use Deepsets.
     parser.set_defaults(add_self_loop=True)
@@ -1548,8 +2040,7 @@ if __name__ == '__main__':
     # print(edge_index[0].min(),edge_index[0].max(),edge_index[1].min(),edge_index[1].max())
     # print('unique nodes: ',len(edge_index[0].unique()))
     # print('unique he: ',len(edge_index[1].unique()))
-    print(edge_index[0,:10])
-    print(edge_index[1,:10])
+
     if args.dname == 'cora':
         dataset = 'co-cora'
     elif args.dname == 'citeseer':
@@ -1772,7 +2263,11 @@ if __name__ == '__main__':
     # # print('H: ',H.shape)
     # X = data.x.to(device)
     n = data.n_x 
-    e = data.num_hyperedges
+    e = data.edge_index.shape[1]
+    if type(e) == np.int32:
+        e = int(e)
+    if type(n) == np.int32:
+        n = int(n)
     # y = data.y.to(device)
 
     budget = int(args.ptb_rate * e)
@@ -1780,10 +2275,13 @@ if __name__ == '__main__':
     print("============ ",args.model, args.dataset,args.attack,str(args.seed),"==================")
     if args.attack == 'mla':
         start_tm = time.time()
-        H_adv, X_adv, robust_model_states = meta_laplacian_pois_attack(root, data, None, model, \
-                        split_idx, Z_orig, budget=budget, epsilon=args.epsilon, T=args.T, \
-                        eta_H=args.eta_H, eta_X=args.eta_X, alpha=args.mla_alpha, \
-        )
+        # H_adv, X_adv, robust_model_states = meta_laplacian_pois_attack(root, data, None, model, \
+        #                 split_idx, Z_orig, budget=budget, epsilon=args.epsilon, T=args.T, \
+        #                 eta_H=args.eta_H, eta_X=args.eta_X, alpha=args.mla_alpha, \
+        # )
+        H_adv, X_adv, results = meta_laplacian_PGD(args, data, split_idx, train_mask, \
+                                    budget = budget, epsilon=args.epsilon, T=args.T, \
+                                    eta_H=args.eta_H, eta_X=None)
         exec_time = time.time() - start_tm 
         # save_npz(root, args.seed, results)
         # H_adv = H_adv.detach()
@@ -1863,8 +2361,12 @@ if __name__ == '__main__':
         'adv_train': train_acc, 'adv_test': test_acc, 'adv_val': val_acc
         }
     evasion_dict.update(vars(args))
+    evasion_dict.update(results)
+    evasion_dict['num_edges'] = e
+    evasion_dict['num_vertices'] = n
+    evasion_dict['num_to_perturb'] = budget
     os.system('mkdir -p large')
-    save_to_csv(evasion_dict,filename=os.path.join('large/','evasion_results.csv'))
+    save_to_csv(evasion_dict,filename=os.path.join('large/','evasion_results4.csv'))
     # import sys 
     # sys.exit(1)
     # evasion_dict = compute_statistics(H,H_adv,Z_orig,Z_adv,X,X_adv,train_mask,val_mask,test_mask,y)

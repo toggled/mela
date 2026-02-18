@@ -106,13 +106,13 @@ def measure_stealthiness(H, H_adv, X, X_adv):
     degree_adv = H_adv.sum(dim=1)
     deg_shift_inf = torch.norm(degree_orig - degree_adv, p=float('inf')).item()
     deg_shift_l1 = torch.norm(degree_orig - degree_adv, p=1).item()
-    deg_shift_l2 = torch.norm(degree_orig - degree_adv, p=2).item()
+    deg_shift_l2 = ((degree_orig - degree_adv)**2).mean().item()
 
     edge_card_orig = H.sum(dim=0)
     edge_card_adv = H_adv.sum(dim=0)
     edge_card_shift_inf = torch.norm(edge_card_orig - edge_card_adv, p=float('inf')).item()
     edge_card_shift_l1 = torch.norm(edge_card_orig - edge_card_adv, p=1).item()
-    edge_card_shift_l2 = torch.norm(edge_card_orig - edge_card_adv, p=2).item()
+    edge_card_shift_l2 = ((edge_card_orig - edge_card_adv)**2).mean().item()
 
     return h_l0, x_delta, deg_shift_l1, edge_card_shift_l1,deg_shift_l2, edge_card_shift_l2, deg_shift_inf, edge_card_shift_inf
 
@@ -163,6 +163,7 @@ def save_to_csv(results, filename='results.csv'):
     if os.path.isfile(filename):
         existing_df = pd.read_csv(filename)
         if not existing_df.columns.equals(df.columns):
+            # print('Existing columns:', existing_df.columns)
             raise ValueError("Column mismatch between results and existing CSV file.")
     df.to_csv(filename, mode='a', header=not os.path.isfile(filename), index=False)
 

@@ -254,7 +254,7 @@ def parse_arg():
     parser.add_argument('--Classifier_hidden', default=256,
                         type=int)  # Decoder hidden units
     parser.add_argument('--display_step', type=int, default=-1)
-    parser.add_argument('--alpha', type=float, default=1)
+    # parser.add_argument('--alpha', type=float, default=1)
     parser.add_argument('--aggregate', default='mean', choices=['sum', 'mean'])
     # ['all_one','deg_half_sym']
     parser.add_argument('--normtype', default='all_one')
@@ -293,16 +293,20 @@ def parse_arg():
     parser.add_argument('--UniGNN_degE', default = 0)
     parser.add_argument('--seed', type=int, default=1000, help='Random seed.')
     parser.add_argument('--attack', type=str, default='mla', \
-                    choices=['mla','Rand-flip', 'Rand-feat','gradargmax','mla_fgsm'], help='model variant')
+                    choices=['mla','Rand-flip', 'Rand-feat','gradargmax','mla_fgsm','mla_pgd'], help='model variant')
     parser.add_argument('--epsilon', type=float, default=0.05, help='Node Feature perturbation bound')
     parser.add_argument('--ptb_rate', type=float, default=0.2,  help='pertubation rate')
     parser.add_argument('--patience', type=int, default=150,
                     help='Patience for training with early stopping.')
-    parser.add_argument('--T', type=int, default=80, help='Number of iterations for the attack.')
-    parser.add_argument('--mla_alpha', type=float, default=4.0, help='weight for classification loss')
+    parser.add_argument('--T', type=int, default=50, help='Number of iterations for the attack.')
+    # parser.add_argument('--mla_alpha', type=float, default=4.0, help='weight for classification loss')
+    parser.add_argument('--beta', type=float, default= 1.0, help='weight for degree penalty loss component')
+    parser.add_argument('--gamma', type=float, default=4.0, help='weight for classification loss component')
+    parser.add_argument('--alpha', type=float, default=1.0, help='weight for laplacian Loss component')
     parser.add_argument('--eta_H', type=float, default=1e-2, help='Learning rate for H perturbation')
     parser.add_argument('--eta_X', type=float, default=1e-2, help='Learning rate for X perturbation')
     parser.add_argument('--num_epochs_sur', type=int, default=80, help='#epochs for the surrogate training.')
+    parser.add_argument('--K_inner', type=int, default=5, help='#epochs for the surrogate training.')
     # parser.add_argument('--surr_class', default='MeLA-D+LinHGNN', choices=['MeLA-D+LinHGNN', 'MeLA-D+HyperMLP','MeLA-D+HGNN','MeLA-D+AllSetTrans'])
     parser.set_defaults(PMA=True)  # True: Use PMA. False: Use Deepsets.
     parser.set_defaults(add_self_loop=True)
@@ -386,8 +390,9 @@ def train(model,data,split_idx, n_idxs,e_idxs,device):
         model.load_state_dict(best_model_state)
     return model, Z_orig
 
-def meta_laplacian_adversarial_train(root, H, X, y, data, unseen_advdata, target_model, split_idx, 
-                                     budget=20, epsilon=0.05, T=20, eta_H=1e-2, eta_X=1e-2, alpha=4.0):
+def meta_laplacian_adversarial_train(args, root, H, X, y, data, unseen_advdata, target_model, split_idx, 
+                                     budget=20, epsilon=0.05, T=20, eta_H=1e-2, eta_X=1e-2, \
+                                        alpha=1.0, beta=1.0, gamma=1.0):
     """
     Meta Laplacian Adversarial Training (Defense)
     
@@ -497,7 +502,7 @@ def meta_laplacian_adversarial_train(root, H, X, y, data, unseen_advdata, target
         degree_penalty = ((dv_temp - dv_orig) ** 2).mean()
 
         cls_loss = F.cross_entropy(logits_adv[train_mask], y[train_mask])
-        loss_meta = lap_dist + alpha * cls_loss + degree_penalty
+        loss_meta = alpha*lap_dist - beta*degree_penalty +  gamma * cls_loss
 
         # Compute gradients for perturbations
         grads = torch.autograd.grad(loss_meta, [delta_H, delta_X])
@@ -528,6 +533,188 @@ def meta_laplacian_adversarial_train(root, H, X, y, data, unseen_advdata, target
         
     tm = time.time() - start_tm 
         # print(f"Iter {t:02d} | Val Acc: {acc_val:.3f} | Test Acc: {acc_test:.3f} | Meta Loss: {loss_meta.item():.4f}")
+
+    return target_model, tm, cleanmodel_poisoned, robustmodel_poisoned
+
+def project_topk_flip(delta_H: torch.Tensor,
+                      H: torch.Tensor,
+                      budget: int):
+    """
+    Project a continuous delta_H onto an L0-bounded flip set.
+
+    Args:
+        delta_H: tensor of shape [n, m], accumulated PGD updates
+        H: binary incidence matrix {0,1}^{n x m}
+        budget: maximum number of flips
+
+    Returns:
+        delta_H_proj: projected perturbation (same shape as H)
+    """
+    with torch.no_grad():
+        # Flip-gain for binary variables
+        flip_gain = (1.0 - 2.0 * H) * delta_H
+
+        # Only beneficial flips
+        score = flip_gain.clone()
+        score[score <= 0] = -float("inf")
+
+        flat = score.view(-1)
+
+        if not torch.isfinite(flat).any():
+            return torch.zeros_like(delta_H)
+
+        k = min(budget, flat.numel())
+        topk_idx = torch.topk(flat, k=k).indices
+
+        # Binary mask of selected flips
+        M = torch.zeros_like(flat)
+        M[topk_idx] = 1.0
+        M = M.view_as(delta_H)
+
+        # Keep only selected directions
+        delta_H_proj = delta_H * M
+
+    return delta_H_proj
+
+def mela_AT(
+    args,
+    H, X, y, data,
+    unseen_advdata,
+    target_model,
+    split_idx,
+    budget,
+    epsilon,
+    T_outer=50,      # adversarial training iterations
+    K_inner=5,       # PGD steps per batch
+    eta_H=1e-2,
+    eta_X=1e-2
+):
+    """
+    Adversarial training aligned with Meta-Laplacian PGD (mlapgd).
+    """
+    alpha, beta, gamma = args.alpha, args.beta, args.gamma
+    device = X.device
+    clean_model = deepcopy(target_model)
+    train_mask = split_idx["train"].to(device)
+
+    # --- constants
+    n, m = H.shape
+    L_orig = lap(H)
+    dv_orig = H @ torch.ones((m,), device=device)
+
+    optimizer = torch.optim.Adam(
+        target_model.parameters(),
+        lr=args.lr,
+        weight_decay=args.wd
+    )
+    criterion = nn.CrossEntropyLoss()
+    cleanmodel_poisoned = []
+    robustmodel_poisoned = []
+    start_tm = time.time()
+    for t in tqdm(range(T_outer),desc="Adv. Training Iteration"):
+
+        # --------------------------------------------------
+        # (1) INNER MAXIMIZATION: PGD on (ΔH, ΔX)
+        # --------------------------------------------------
+        delta_H = torch.zeros_like(H, requires_grad=True)
+        delta_X = torch.zeros_like(X, requires_grad=True)
+        _, acc_robust, acc_vanilla, _ = evaluate_robustness(data,unseen_advdata,y,target_model,clean_model,split_idx)
+        cleanmodel_poisoned.append(acc_vanilla)
+        robustmodel_poisoned.append(acc_robust)
+        for _ in range(K_inner):
+
+            H_pert = torch.clamp(H + delta_H, 0, 1)
+            X_pert = X + delta_X
+            L_pert = lap(H_pert)
+
+            # forward
+            data_adv = deepcopy(data).to(device)
+            data_adv.edge_index = incidence_to_edge_index2(H_pert)
+            data_adv.x = X_pert
+            data_adv = ExtractV2E(data_adv)
+            data_adv = Add_Self_Loops(data_adv)
+            data_adv.edge_index[1] -= data_adv.edge_index[1].min()
+            data_adv.edge_index = data_adv.edge_index.to(device)
+            if args.method in ['AllSetTransformer', 'AllDeepSets']:
+                data_adv = norm_contruction(data_adv, option=args.normtype)
+
+            test_flag = True
+            if ((args.method == 'UniGCNII') or (args.method == 'HyperGCN')):
+                data_adv = [data_adv, test_flag]
+            logits = target_model(data_adv)
+
+            # ---- meta loss (same as mlapgd)
+            # delta_L = (L_pert - L_orig) @ logits.detach()
+            delta_L = (L_pert - L_orig) @ logits.detach()
+            lap_dist = torch.norm(delta_L, p=2)
+
+            dv_temp = H_pert @ torch.ones((m,), device=device)
+            degree_penalty = ((dv_temp - dv_orig) ** 2).mean()
+
+            loss_cls = criterion(logits[train_mask], y[train_mask])
+            # loss_cls = criterion(logits,y)
+
+            loss_meta = (
+                alpha * lap_dist
+                - beta * degree_penalty
+                + gamma * loss_cls
+            )
+
+            gH, gX = torch.autograd.grad(loss_meta, [delta_H, delta_X])
+
+            with torch.no_grad():
+                # ---- structure PGD (flip-gain)
+                flip_gain = (1 - 2 * H) * gH
+                score = flip_gain.clone()
+                score[score <= 0] = -float("inf")
+
+                flat = score.flatten()
+                k = min(budget, flat.numel())
+                topk = torch.topk(flat, k=k).indices
+
+                M = torch.zeros_like(flat)
+                M[topk] = 1.0
+                M = M.view_as(H)
+
+                # delta_H.copy_(eta_H * gH.sign())
+                # delta_H.mul_(M)
+                delta_H.add_(eta_H * gH.sign())
+                delta_H = project_topk_flip(delta_H, H, budget)
+
+
+                # ---- feature PGD
+                delta_X.add_(eta_X * gX.sign())
+                delta_X.clamp_(-epsilon, epsilon)
+            #  re-enable gradient tracking for the next PGD step
+            delta_H = delta_H.detach().requires_grad_(True)
+            delta_X = delta_X.detach().requires_grad_(True)
+        # --------------------------------------------------
+        # (2) OUTER MINIMIZATION: model update
+        # --------------------------------------------------
+        H_adv = H + (1 - 2 * H) * (delta_H != 0).float()
+        X_adv = X + delta_X.detach()
+
+        data_adv = deepcopy(data).to(device)
+        data_adv.edge_index = incidence_to_edge_index2(H_adv)
+        data_adv.x = X_adv
+        data_adv = ExtractV2E(data_adv)
+        data_adv = Add_Self_Loops(data_adv)
+        data_adv.edge_index[1] -= data_adv.edge_index[1].min()
+        data_adv.edge_index = data_adv.edge_index.to(device)
+        if args.method in ['AllSetTransformer', 'AllDeepSets']:
+            data_adv = norm_contruction(data_adv, option=args.normtype)
+
+        test_flag = True
+        if ((args.method == 'UniGCNII') or (args.method == 'HyperGCN')):
+            data_adv = [data_adv, test_flag]
+        target_model.train()
+        optimizer.zero_grad()
+        logits_adv = target_model(data_adv)
+        loss = criterion(logits_adv[train_mask], y[train_mask])
+        #loss = criterion(logits_adv, y)
+        loss.backward()
+        optimizer.step()
+    tm = time.time() - start_tm 
 
     return target_model, tm, cleanmodel_poisoned, robustmodel_poisoned
 
@@ -578,7 +765,8 @@ if __name__ == '__main__':
     # # Part 1: Load data
     
     # root='./hypergraphMLP_newsplit'
-    root='./baseline_adv'
+    # root='./baseline_adv'
+    root='./icml26_baseline_adv'
     # root='./'+args.attack+'_hypergraphMLP_final2'
     os.makedirs(root, exist_ok=True)
     save = True
@@ -625,10 +813,10 @@ if __name__ == '__main__':
             data.num_hyperedges = torch.tensor(
                 [data.edge_index[0].max()-data.n_x[0]+1])
     data = ExtractV2E(data)
-    H = torch.Tensor(ConstructH(data)).to('cuda:0')
+    H = torch.Tensor(ConstructH(data))
     if args.add_self_loop:
         data = Add_Self_Loops(data)
-    setup_seed(args.seed)
+    # setup_seed(args.seed)
     if args.method in ['AllSetTransformer', 'AllDeepSets']:
         data = norm_contruction(data, option=args.normtype)
     elif args.method in ['HCHA', 'HGNN']:
@@ -652,7 +840,7 @@ if __name__ == '__main__':
                               if torch.cuda.is_available() else 'cpu')
     else:
         device = torch.device('cpu')
-    device = 'cpu'
+    # device = 'cpu'
     H = H.to(device)
     # # Part 2: Load model
     
@@ -682,6 +870,7 @@ if __name__ == '__main__':
     
     args.__setattr__('dataset',dataset)
     args.__setattr__('surr_class','MeLA-D'+args.method)
+    setup_seed(33) 
     split_idx = rand_train_test_idx(data.y)
     train_mask, val_mask, test_mask = split_idx['train'], split_idx['valid'], split_idx['test']
     print(sum(train_mask)*100/len(train_mask))
@@ -734,7 +923,7 @@ if __name__ == '__main__':
 
     X = data.x.to(device)
     n = data.n_x 
-    e = data.num_hyperedges
+    e = data.edge_index.shape[1]
     y = data.y.to(device)
     
     # print('train_mask:', train_mask.sum()/len(train_mask))
@@ -742,22 +931,31 @@ if __name__ == '__main__':
     args.__setattr__('model', args.method)
     # Load H_adv, X_adv 
     # try:
-    H_adv = np.load(os.path.join(args.method+'_Melad', args.model+"_"+args.attack+"_"+args.dataset+"_"+str(args.seed)+ '_H_adv.npz'))['arr_0']
+    if args.attack == 'mla':
+        attack = 'mla_pgd'
+    else:
+        attack = args.attack
+    H_adv = np.load(os.path.join(args.method+'_Melad', args.model+"_"+attack+"_"+args.dataset+"_"+str(args.seed)+ '_H_adv.npz'))['arr_0']
     H_adv = torch.from_numpy(H_adv).to(device)
-    X_adv = np.load(os.path.join(args.method+'_Melad', args.model+"_"+args.attack+"_"+args.dataset+"_"+str(args.seed)+ '_X_adv.npz'))['arr_0']
+    X_adv = np.load(os.path.join(args.method+'_Melad', args.model+"_"+attack+"_"+args.dataset+"_"+str(args.seed)+ '_X_adv.npz'))['arr_0']
     X_adv = torch.from_numpy(X_adv).to(device)
-    path = os.path.join(args.method+'_Melad',args.model+"_"+args.attack+"_"+args.dataset+"_"+str(args.seed)+ "_data.pth")
+    path = os.path.join(args.method+'_Melad',args.model+"_"+attack+"_"+args.dataset+"_"+str(args.seed)+ "_data.pth")
     # print(path)
     data_adv = torch.load(path,weights_only=False).to(device)
     # except Exception as e:
     #     print("Error loading adversarial data: ",e)
     #     import sys 
     #     sys.exit(1)
-
-    robust_model,tm, cleanmodel_poisoned, robustmodel_poisoned = \
-        meta_laplacian_adversarial_train(root, H, X, y, data, data_adv, deepcopy(model), \
-                split_idx, budget=perturbations, epsilon=args.epsilon, T=args.T, \
-                eta_H=args.eta_H, eta_X=args.eta_X, alpha=args.mla_alpha)
+    if args.attack != 'mla_pgd':
+        robust_model,tm, cleanmodel_poisoned, robustmodel_poisoned = \
+            meta_laplacian_adversarial_train(args, root, H, X, y, data, data_adv, deepcopy(model), \
+                    split_idx, budget=perturbations, epsilon=args.epsilon, T=args.T, \
+                    eta_H=args.eta_H, eta_X=args.eta_X, alpha=args.alpha, beta=args.beta, gamma=args.gamma)
+    else: 
+        robust_model,tm, cleanmodel_poisoned, robustmodel_poisoned = \
+        mela_AT(args, H, X, y, data, data_adv, deepcopy(model), \
+                split_idx, budget=perturbations, epsilon=args.epsilon, T_outer=args.T, \
+                K_inner = args.K_inner, eta_H=args.eta_H, eta_X=args.eta_X)
     # torch.save(robust_model.state_dict(), 'robust_model.pth')
     acc_robust_clean, acc_robust, acc_vanilla, acc_gain = \
         evaluate_robustness(data, data_adv, y, robust_model, clean_model, split_idx)
@@ -765,10 +963,10 @@ if __name__ == '__main__':
     args.__setattr__('adv_acc_rob', acc_robust)
     args.__setattr__('adv_acc_base', acc_vanilla)
     args.__setattr__('rob_gain', acc_gain)
-    args.__setattr__('time',tm)
+    args.__setattr__('time', tm)
     res = vars(args)
     print(json.dumps(res,indent = 4))
-    save_to_csv(res,filename=os.path.join(root,'adv_results.csv'))
+    save_to_csv(res,filename=os.path.join(root,'adv_results_aaai.csv'))
     cleanmodel_poisoned = np.array(cleanmodel_poisoned)
     robustmodel_poisoned = np.array(robustmodel_poisoned)
     # from matplotlib import pyplot as plt

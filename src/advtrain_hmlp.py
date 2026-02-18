@@ -248,7 +248,7 @@ def parse_arg():
     parser.add_argument('--Classifier_hidden', default=256,
                         type=int)  # Decoder hidden units
     parser.add_argument('--display_step', type=int, default=-1)
-    parser.add_argument('--alpha', type=float, default=1)
+    parser.add_argument('--hyperMLP_alpha', type=float, default=1)
     parser.add_argument('--aggregate', default='mean', choices=['sum', 'mean'])
     # ['all_one','deg_half_sym']
     parser.add_argument('--normtype', default='all_one')
@@ -293,12 +293,15 @@ def parse_arg():
     parser.add_argument('--patience', type=int, default=150,
                     help='Patience for training with early stopping.')
     parser.add_argument('--T', type=int, default=80, help='Number of iterations for the attack.')
-    parser.add_argument('--mla_alpha', type=float, default=4.0, help='weight for classification loss')
+    # parser.add_argument('--mla_alpha', type=float, default=4.0, help='weight for classification loss')
     parser.add_argument('--eta_H', type=float, default=1e-2, help='Learning rate for H perturbation')
     parser.add_argument('--eta_X', type=float, default=1e-2, help='Learning rate for X perturbation')
     parser.add_argument('--num_epochs_sur', type=int, default=80, help='#epochs for the surrogate training.')
     parser.add_argument('--surr_class', default='MeLA-D+LinHGNN', choices=['MeLA-D+LinHGNN', 'MeLA-D+HyperMLP'])
     parser.add_argument('--mode',type=str,default='attack',choices=['attack','defense'])
+    parser.add_argument('--beta', type=float, default= 1.0, help='weight for degree penalty loss component')
+    parser.add_argument('--gamma', type=float, default=1.0, help='weight for classification loss component')
+    parser.add_argument('--alpha', type=float, default=1.0, help='weight for laplacian Loss component')
     parser.set_defaults(PMA=True)  # True: Use PMA. False: Use Deepsets.
     parser.set_defaults(add_self_loop=True)
     parser.set_defaults(exclude_self=False)
@@ -338,8 +341,8 @@ def train(model,data,split_idx, n_idxs,e_idxs,device):
         out, x = model(data)
         out = F.log_softmax(out, dim=1)
         loss_sth = 0
-        if(args.alpha > 0):
-            loss_sth = smooth_loss(x, n_idxs, e_idxs, edge_index, epoch) * args.alpha
+        if(args.hyperMLP_alpha > 0):
+            loss_sth = smooth_loss(x, n_idxs, e_idxs, edge_index, epoch) * args.hyperMLP_alpha
         loss_cls = criterion(out[train_idx], data.y[train_idx])
         loss = loss_cls + loss_sth
         loss.backward()
@@ -354,7 +357,7 @@ def train(model,data,split_idx, n_idxs,e_idxs,device):
         val_acc_tensor[0, epoch] = result[1]
         test_acc_tensor[0, epoch] = result[2]
         smooth_loss_tensor[0, epoch] = loss_sth
-        if(args.alpha > 0):
+        if(args.hyperMLP_alpha > 0):
             smooth_loss_tensor[0, epoch] = loss_sth.cpu()
         if valid_loss.item() < best_val_loss:
             best_val_loss = valid_loss.item()
@@ -382,8 +385,142 @@ def train(model,data,split_idx, n_idxs,e_idxs,device):
         model.load_state_dict(best_model_state)
     return model, Z_orig
 
-def meta_laplacian_adversarial_train(root, H, X, y, data, unseen_advdata, target_model, split_idx, 
-                                     budget=20, epsilon=0.05, T=20, eta_H=1e-2, eta_X=1e-2, alpha=4.0):
+# def meta_laplacian_adversarial_train(root, H, X, y, data, unseen_advdata, target_model, split_idx, 
+#                                      budget=20, epsilon=0.05, T=20, eta_H=1e-2, eta_X=1e-2, alpha=4.0):
+#     """
+#     Meta Laplacian Adversarial Training (Defense)
+    
+#     Trains the target model to be robust against structure and feature perturbations
+#     generated via Laplacian-guided meta-gradients.
+
+#     Args:
+#         H: Original incidence matrix (n x m)
+#         X: Original node features (n x d)
+#         y: Node labels
+#         data: PyG data object
+#         HG: Not used here but kept for compatibility
+#         target_model: The model being trained for robustness
+#         train_mask, val_mask, test_mask: Masks for dataset splits
+#     Returns:
+#         Trained target model
+#     """
+#     device = X.device
+#     clean_model = deepcopy(target_model)
+#     train_mask, val_mask, test_mask = split_idx['train'].to(device), split_idx['valid'].to(device), split_idx['test'].to(device)
+#     n, m = H.shape
+#     H = H.clone().detach()
+#     X = X.clone().detach()
+#     L_orig = lap(H)
+#     dv_orig = H @ torch.ones((m,), device=device)
+    
+#     delta_H = (1e-3 * torch.randn_like(H)).requires_grad_()
+#     delta_X = (1e-3 * torch.randn_like(X)).requires_grad_()
+
+#     criterion = nn.CrossEntropyLoss()
+#     optimizer = torch.optim.Adam(target_model.parameters(), lr=args.lr, weight_decay=args.wd)
+#     cleanmodel_poisoned = []
+#     robustmodel_poisoned = []
+#     start_tm = time.time()
+#     for t in tqdm(range(T), desc="Adversarial Training Iteration"):
+#         # Apply perturbations
+#         H_pert = torch.clamp(H + delta_H, 0, 1)
+#         X_pert = (X + delta_X).clamp(-1, 1)
+#         L_pert = lap(H_pert)
+
+#         # Update data object
+#         data_adv = deepcopy(data).to(device)
+#         data_adv.edge_index = incidence_to_edge_index(H_pert)
+#         data_adv.x = X_pert
+#         # print(torch.norm(data_adv.x-X).item())
+#         # target_model.eval()
+#         # clean_model.eval()
+#         # with torch.no_grad():
+#         #     logits_r, _ = target_model(data_adv)
+#         #     robustmodel_poisoned.append(accuracy(logits_r[test_mask], y[test_mask]).item() * 100)
+#         #     logits_c, _ = clean_model(data_adv)
+#         #     cleanmodel_poisoned.append(accuracy(logits_c[test_mask], y[test_mask]).item() * 100)
+#         #     print(cleanmodel_poisoned[-1],' ',robustmodel_poisoned[-1])
+#         _, acc_robust, acc_vanilla, _ = evaluate_robustness(data,unseen_advdata,y,target_model,clean_model,split_idx)
+#         cleanmodel_poisoned.append(acc_vanilla)
+#         robustmodel_poisoned.append(acc_robust)
+#         # Train target model on perturbed data
+#         for epoch in range(args.num_epochs_sur):
+#             target_model.train()
+#             optimizer.zero_grad()
+#             logits, _ = target_model(data_adv)
+#             cls_loss = criterion(logits[train_mask], y[train_mask])
+#             cls_loss.backward(retain_graph = True)
+#             optimizer.step()
+#             # if epoch % 100 == 0:
+#             #     result = evaluate(target_model, data_adv, split_idx, eval_acc)     
+#             #     print(f'Epoch: {epoch:02d}, '
+#             #         f'Cls Train Loss: {cls_loss:.4f}, '
+#             #         f'Valid Loss: {result[4]:.4f}, '
+#             #         f'Test  Loss: {result[5]:.4f}, '
+#             #         f'Train Acc: {100 * result[0]:.2f}%, '
+#             #         f'Valid Acc: {100 * result[1]:.2f}%, '
+#             #         f'Test  Acc: {100 * result[2]:.2f}%')      
+
+#         # Evaluate model on clean data
+#         target_model.eval()
+#         with torch.no_grad():
+#             logits_clean, _ = target_model(data)
+#         #     # logits_adv, _ = target_model(data_adv)
+#         #     acc_val = accuracy(logits_clean[val_mask], y[val_mask]).item()*100
+#         #     acc_test = accuracy(logits_clean[test_mask], y[test_mask]).item()*100
+#             # print('On Clean: acc_val: ',acc_val,' acc_test: ',acc_test)
+
+#         # Recompute forward pass on perturbed data *with gradients*
+#         target_model.train()  # Ensure gradients are tracked
+#         logits_adv, _ = target_model(data_adv)
+
+#         # Compute meta loss
+#         Z = logits_clean.detach()
+#         delta_L = (L_pert - L_orig) @ Z
+#         lap_dist = torch.norm(delta_L, p=2).mean()
+        
+#         H_temp = H_pert.detach()
+#         dv_temp = H_temp @ torch.ones((m,), device=device)
+#         degree_penalty = ((dv_temp - dv_orig) ** 2).mean()
+
+#         cls_loss = F.cross_entropy(logits_adv[train_mask], y[train_mask])
+#         loss_meta = lap_dist + alpha * cls_loss - degree_penalty
+
+#         # Compute gradients for perturbations
+#         grads = torch.autograd.grad(loss_meta, [delta_H, delta_X])
+
+#         # Gradient ascent to update delta_H and delta_X
+#         with torch.no_grad():
+#             delta_H += eta_H * grads[0].sign()
+#             delta_X += eta_X * grads[1].sign()
+
+#             # Project delta_H to respect sparsity budget
+#             flat = delta_H.abs().flatten()
+#             topk = torch.topk(flat, k=min(budget, delta_H.numel())).indices
+#             delta_H_new = torch.zeros_like(delta_H)
+#             delta_H_new.view(-1)[topk] = delta_H.view(-1)[topk]
+
+#             # Remove bad nodes/edges
+#             H_temp = torch.clamp(H + delta_H_new, 0, 1)
+#             row_degrees = H_temp.sum(dim=1)
+#             col_degrees = H_temp.sum(dim=0)
+#             bad_nodes = (row_degrees < 1).nonzero(as_tuple=True)[0]
+#             bad_edges = (col_degrees < 2).nonzero(as_tuple=True)[0]
+#             delta_H_new[bad_nodes, :] = 0
+#             delta_H_new[:, bad_edges] = 0
+#             delta_H.copy_(delta_H_new)
+
+#             # Clamp feature perturbation
+#         delta_X = delta_X.clamp(-epsilon, epsilon)
+        
+#     tm = time.time() - start_tm 
+#         # print(f"Iter {t:02d} | Val Acc: {acc_val:.3f} | Test Acc: {acc_test:.3f} | Meta Loss: {loss_meta.item():.4f}")
+
+#     return target_model, tm, cleanmodel_poisoned, robustmodel_poisoned
+
+def meta_laplacian_adversarial_train(args, root, H, X, y, data, unseen_advdata, target_model, split_idx, 
+                                     budget=20, epsilon=0.05, T=20, eta_H=1e-2, eta_X=1e-2, \
+                                        alpha=1.0, beta=1.0, gamma=1.0):
     """
     Meta Laplacian Adversarial Training (Defense)
     
@@ -426,8 +563,19 @@ def meta_laplacian_adversarial_train(root, H, X, y, data, unseen_advdata, target
 
         # Update data object
         data_adv = deepcopy(data).to(device)
-        data_adv.edge_index = incidence_to_edge_index(H_pert)
+        data_adv.edge_index = incidence_to_edge_index2(H_pert)
         data_adv.x = X_pert
+        data_adv.n_x = X_pert.shape[0]
+        data_adv = ExtractV2E(data_adv)
+        data_adv = Add_Self_Loops(data_adv)
+        data_adv.edge_index[1] -= data_adv.edge_index[1].min()
+        data_adv.edge_index = data_adv.edge_index.to(device)
+        if args.method in ['AllSetTransformer', 'AllDeepSets']:
+            data_adv = norm_contruction(data_adv, option=args.normtype)
+
+        test_flag = True
+        if ((args.method == 'UniGCNII') or (args.method == 'HyperGCN')):
+            data_adv = [data_adv, test_flag]
         # print(torch.norm(data_adv.x-X).item())
         # target_model.eval()
         # clean_model.eval()
@@ -444,7 +592,8 @@ def meta_laplacian_adversarial_train(root, H, X, y, data, unseen_advdata, target
         for epoch in range(args.num_epochs_sur):
             target_model.train()
             optimizer.zero_grad()
-            logits, _ = target_model(data_adv)
+            # print(data_adv)
+            logits,_ = target_model(data_adv)
             cls_loss = criterion(logits[train_mask], y[train_mask])
             cls_loss.backward(retain_graph = True)
             optimizer.step()
@@ -461,7 +610,7 @@ def meta_laplacian_adversarial_train(root, H, X, y, data, unseen_advdata, target
         # Evaluate model on clean data
         target_model.eval()
         with torch.no_grad():
-            logits_clean, _ = target_model(data)
+            logits_clean,_ = target_model(data)
         #     # logits_adv, _ = target_model(data_adv)
         #     acc_val = accuracy(logits_clean[val_mask], y[val_mask]).item()*100
         #     acc_test = accuracy(logits_clean[test_mask], y[test_mask]).item()*100
@@ -469,7 +618,7 @@ def meta_laplacian_adversarial_train(root, H, X, y, data, unseen_advdata, target
 
         # Recompute forward pass on perturbed data *with gradients*
         target_model.train()  # Ensure gradients are tracked
-        logits_adv, _ = target_model(data_adv)
+        logits_adv,_ = target_model(data_adv)
 
         # Compute meta loss
         Z = logits_clean.detach()
@@ -481,7 +630,7 @@ def meta_laplacian_adversarial_train(root, H, X, y, data, unseen_advdata, target
         degree_penalty = ((dv_temp - dv_orig) ** 2).mean()
 
         cls_loss = F.cross_entropy(logits_adv[train_mask], y[train_mask])
-        loss_meta = lap_dist + alpha * cls_loss + degree_penalty
+        loss_meta = alpha*lap_dist - beta*degree_penalty +  gamma * cls_loss
 
         # Compute gradients for perturbations
         grads = torch.autograd.grad(loss_meta, [delta_H, delta_X])
@@ -613,7 +762,7 @@ if __name__ == '__main__':
             data.num_hyperedges = torch.tensor(
                 [data.edge_index[0].max()-data.n_x[0]+1])
     data = ExtractV2E(data)
-    setup_seed(args.seed)
+    # setup_seed(args.seed)
     if((args.perturb_type == 'toxic') and (args.perturb_prop > 0)):
         data = perturb_hyperedges(data, args.perturb_prop)
     if args.dname == 'cora':
@@ -625,6 +774,7 @@ if __name__ == '__main__':
     else:
         dataset = args.dname
     args.__setattr__('dataset',dataset)
+    setup_seed(33) 
     split_idx = rand_train_test_idx(data.y)
     train_mask, val_mask, test_mask = split_idx['train'], split_idx['valid'], split_idx['test']
     print(sum(train_mask)*100/len(train_mask))
@@ -676,7 +826,7 @@ if __name__ == '__main__':
     H = torch.Tensor(ConstructH(data)).to(device)
     X = data.x.to(device)
     n = data.n_x 
-    e = data.num_hyperedges
+    e = data.edge_index.shape[1] # data.num_hyperedges
     y = data.y.to(device)
     
     # print('train_mask:', train_mask.sum()/len(train_mask))
@@ -684,11 +834,15 @@ if __name__ == '__main__':
     args.__setattr__('model', args.method)
     # Load H_adv, X_adv 
     # try:
-    H_adv = np.load(os.path.join(root, args.model+"_"+args.attack+"_"+args.dataset+"_"+str(args.seed)+ '_H_adv.npz'))['arr_0']
+    if args.attack == 'mla':
+        attack = 'mla_pgd'
+    else:
+        attack = args.attack
+    H_adv = np.load(os.path.join(root, args.model+"_"+attack+"_"+args.dataset+"_"+str(args.seed)+ '_H_adv.npz'))['arr_0']
     H_adv = torch.from_numpy(H_adv).to(device)
-    X_adv = np.load(os.path.join(root, args.model+"_"+args.attack+"_"+args.dataset+"_"+str(args.seed)+ '_X_adv.npz'))['arr_0']
+    X_adv = np.load(os.path.join(root, args.model+"_"+attack+"_"+args.dataset+"_"+str(args.seed)+ '_X_adv.npz'))['arr_0']
     X_adv = torch.from_numpy(X_adv).to(device)
-    path = os.path.join(root,args.model+"_"+args.attack+"_"+args.dataset+"_"+str(args.seed)+ "_data.pth")
+    path = os.path.join(root,args.model+"_"+attack+"_"+args.dataset+"_"+str(args.seed)+ "_data.pth")
     # print(path)
     data_adv = torch.load(path,weights_only=False).to(device)
     # except Exception as e:
@@ -696,9 +850,14 @@ if __name__ == '__main__':
     #     import sys 
     #     sys.exit(1)
     robust_model,tm, cleanmodel_poisoned, robustmodel_poisoned = \
-        meta_laplacian_adversarial_train(root, H, X, y, data, data_adv, deepcopy(model), \
+        meta_laplacian_adversarial_train(args, root, H, X, y, data, data_adv, deepcopy(model), \
                 split_idx, budget=perturbations, epsilon=args.epsilon, T=args.T, \
-                eta_H=args.eta_H, eta_X=args.eta_X, alpha=args.mla_alpha)
+                eta_H=args.eta_H, eta_X=args.eta_X, \
+                    alpha=args.alpha, beta=args.beta, gamma=args.gamma)
+        # meta_laplacian_adversarial_train(root, H, X, y, data, data_adv, deepcopy(model), \
+        #         split_idx, budget=perturbations, epsilon=args.epsilon, T=args.T, \
+        #         eta_H=args.eta_H, eta_X=args.eta_X, alpha=args.mla_alpha)
+
     # torch.save(robust_model.state_dict(), 'robust_model.pth')
     acc_robust_clean, acc_robust, acc_vanilla, acc_gain = \
         evaluate_robustness(data, data_adv, y, robust_model, clean_model, split_idx)
@@ -708,7 +867,7 @@ if __name__ == '__main__':
     args.__setattr__('rob_gain', acc_gain)
     args.__setattr__('time',tm)
     res = vars(args)
-    save_to_csv(res,filename=os.path.join(root,'adv_results.csv'))
+    save_to_csv(res,filename=os.path.join(root,'adv_results_aaai2.csv'))
     cleanmodel_poisoned = np.array(cleanmodel_poisoned)
     robustmodel_poisoned = np.array(robustmodel_poisoned)
     # from matplotlib import pyplot as plt
@@ -717,7 +876,7 @@ if __name__ == '__main__':
     # plt.legen()
     # plt.show()
     # Save accuracy trajectories.  
-    np.savez(os.path.join(root, args.model+"_"+args.attack+"_"+args.dataset+"_"+str(args.seed)+ '_clean_pois.npz'),cleanmodel_poisoned)
-    np.savez(os.path.join(root, args.model+"_"+args.attack+"_"+args.dataset+"_"+str(args.seed)+ '_robust_pois.npz'),robustmodel_poisoned)
+    # np.savez(os.path.join(root, args.model+"_"+args.attack+"_"+args.dataset+"_"+str(args.seed)+ '_clean_pois.npz'),cleanmodel_poisoned)
+    # np.savez(os.path.join(root, args.model+"_"+args.attack+"_"+args.dataset+"_"+str(args.seed)+ '_robust_pois.npz'),robustmodel_poisoned)
     
     

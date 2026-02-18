@@ -7,7 +7,6 @@ Hypergraph Neural Networks``
 
 ```bash
 bash run.sh # To run HGNN, AllSetTransformer 
-bash runmlp.sh # To run HyperMLP
 ```
 2. Running MeLA-D for adversarial training.
 
